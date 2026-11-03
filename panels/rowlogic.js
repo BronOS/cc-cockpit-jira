@@ -37,7 +37,7 @@ function rowKeyAction(key, onRow, mods) {
 }
 
 /**
- * Whether a click opens the issue: anywhere on the row except its buttons and the Wrong? box
+ * Whether a click opens the issue: anywhere on the row except its buttons and the triage chooser
  * (which act themselves), and not when the person was selecting text.
  */
 function rowClickOpens(inControl, selecting) {
@@ -48,14 +48,20 @@ function rowClickOpens(inControl, selecting) {
  * The hover buttons of a row, in order: `{ action, label, title }`. `action` is the message type
  * the page posts (`wrong` only toggles the chooser in the page).
  *
- * @param {{ unread: boolean, canUnread: boolean, lane: string }} r
+ * The triage button is labelled with the verdict itself ("action ▾"), not "Wrong?": a new person
+ * could not tell what was wrong; the label says what triage decided, the chooser asks the question.
+ *
+ * @param {{ unread: boolean, canUnread: boolean, lane: string, verdict?: { priority: string } }} r
  * @param {{ triageOn: boolean }} s
  */
 function rowButtons(r, s) {
   const out = [{ action: 'browser', label: '↗', title: 'Open in the browser' }]
   if (r.unread) out.push({ action: 'read', label: 'Read', title: 'Mark read' })
   else if (r.canUnread) out.push({ action: 'unread', label: 'Unread', title: 'Mark unread' })
-  if (s && s.triageOn && r.lane !== 'done') out.push({ action: 'wrong', label: 'Wrong?', title: 'Correct the triage priority' })
+  if (s && s.triageOn && r.lane !== 'done') {
+    const p = r.verdict && r.verdict.priority
+    out.push({ action: 'wrong', label: p ? `${p} ▾` : 'triage ▾', title: p ? `Triage says ${p}: change how much this needs you` : 'Not triaged yet: say how much this needs you' })
+  }
   out.push({ action: 'discuss', label: 'Discuss', title: 'Send the issue to the Claude tab you are looking at' })
   out.push({ action: 'newSession', label: 'New', title: 'Open a new Claude tab about this issue' })
   return out

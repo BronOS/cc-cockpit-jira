@@ -3,7 +3,10 @@
 Status: design agreed with the user on 2026-11-02; 0.2.0 (same day, after trying 0.1.0): rows
 open on click with hover buttons, and the opened issue is styled HTML with attachments (section
 "The issue view"). External plugin (own repo, for the marketplace). The first source plugin for
-jev-triage. Read-only towards Jira. 0.3.0: an "Issues per lane" setting with Show all / Hide.
+jev-triage. Read-only towards Jira. 0.3.0: an "Issues per lane" setting with Show all / Hide. 0.4.0: the last
+poll and Refresh (an icon) in the panel's title bar on cc-cockpit 0.9.0+ (`ctx.panels.header`,
+`lib/header.js`; the page keeps its own line on older apps), and links open through
+`ctx.openExternal` on 0.9.1+ (a plugin host has no display variables, so xdg-open found no browser).
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
@@ -69,7 +72,10 @@ An issue is unread while someone else commented, changed its status / assignee /
 assigned it to the person, or mentioned them after the time they last saw it. Seen = the time of
 the newest activity when the person opened the issue (the overlay) or pressed Mark read; Mark
 unread sets it just before the newest activity of others. The first run marks everything seen as
-it is, so only what happens next is new. Stored per project, bounded.
+it is, so only what happens next is new. Stored per project, bounded. Since 0.4.0 Mark unread
+works on every issue but Done: it also sets a flag (unread until opened or Mark read), so an issue
+whose activity is all the person's own can be a reminder; flags do not change triage (it goes by
+others' activity, `newCount`).
 
 ## Triage (jev-triage `triage` v1, source `jira`)
 
@@ -93,7 +99,8 @@ dot (priority colour, hollow below 0.5 confidence), unread mark, assignee or "me
 A click on a row opens the issue (the overlay); so does Enter or Space on a focused row (each row
 is one tab stop; ↑ / ↓ / Home / End move between rows). The other actions are small buttons shown
 while the row is hovered or has the focus inside it (in the DOM all the time, only faded out, so
-Tab reaches them): ↗ (open in the browser via ctx.exec of xdg-open/open), Read / Unread, Wrong?
+Tab reaches them): ↗ (open in the browser: `ctx.openExternal` on cc-cockpit 0.9.1+, else ctx.exec of
+xdg-open/open), Read / Unread, Wrong?
 (jev-triage's `triage.override`; the note for its eval goes through the triage panel), Discuss,
 New (session). The pure decisions (which buttons, which key does what) are in
 `panels/rowlogic.js`, which node:test loads too. A redraw (every state message) puts the keyboard

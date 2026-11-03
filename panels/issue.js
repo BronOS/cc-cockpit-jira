@@ -9,7 +9,7 @@
 // still keeps only the tags and attributes that builder writes (a second line of defence, and the
 // page CSP runs no inline script either), and an image only ever gets a data: URL of a picture.
 
-const TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'BR', 'HR', 'UL', 'OL', 'LI', 'PRE', 'CODE', 'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A', 'IMG', 'STRONG', 'EM', 'S', 'U', 'SUB', 'SUP', 'SPAN', 'DIV', 'DETAILS', 'SUMMARY', 'FIGURE', 'FIGCAPTION'])
+const TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'BR', 'HR', 'UL', 'OL', 'LI', 'PRE', 'CODE', 'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A', 'IMG', 'STRONG', 'EM', 'S', 'U', 'SUB', 'SUP', 'SPAN', 'DIV', 'DETAILS', 'SUMMARY', 'FIGURE', 'FIGCAPTION', 'DL', 'DT', 'DD'])
 const ATTRS = new Set(['class', 'colspan', 'rowspan', 'alt', 'title', 'data-asset', 'href'])
 const IMAGE_URL = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/
 

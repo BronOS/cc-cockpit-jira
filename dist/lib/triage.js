@@ -95,7 +95,10 @@ function mentionedBy(issue) {
  * @param {'full'|'summary'} mode
  */
 function triageItem(row, mode) {
-  const { issue, lane, unread } = row
+  const { issue, lane } = row
+  // Activity of others only: a flag (the person's own Mark unread) is a reminder, not news, and
+  // must not change the verdict.
+  const unread = typeof row.newCount === 'number' ? row.newCount > 0 : Boolean(row.unread)
   const item = {
     id: issue.key,
     text: triageText(issue, { mode, lane, mark: row.mark }),

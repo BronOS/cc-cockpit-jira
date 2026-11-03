@@ -11,18 +11,24 @@
 // lasts until a poll read every issue it found: a poll that deferred some reads (the per-poll
 // budget) leaves `seeded` false, and the deferred ones are marked as they arrive, instead of
 // showing up as a wall of unread on the next poll.
+//
+// Besides the marks, `flags`: issues the person marked unread themselves (Mark unread). A flag
+// makes an issue unread whatever its activity, so the button works on every issue, also one where
+// all activity is the person's own; opening it or Mark read clears it. Flags are the person's
+// reminder only: triage still goes by the activity of others (lib/triage.js uses newCount).
 
 const MAX_MARKS = 3000
 
 /** A fresh state for one site and account (marks of another account mean nothing here). */
 function emptySeen(site, accountId) {
-  return { site, accountId, seeded: false, marks: {} }
+  return { site, accountId, seeded: false, marks: {}, flags: {} }
 }
 
 /** The stored state when it belongs to this site and account, else a fresh one. */
 function loadSeen(stored, site, accountId) {
   if (stored && stored.site === site && stored.accountId === accountId && stored.marks && typeof stored.marks === 'object') {
-    return { site, accountId, seeded: Boolean(stored.seeded), marks: { ...stored.marks } }
+    const flags = stored.flags && typeof stored.flags === 'object' ? { ...stored.flags } : {}
+    return { site, accountId, seeded: Boolean(stored.seeded), marks: { ...stored.marks }, flags }
   }
   return emptySeen(site, accountId)
 }
@@ -73,18 +79,25 @@ function seed(seen, entries, complete) {
 function markRead(seen, issue, now = Date.now()) {
   const newest = newestCounted(issue, 'any')
   seen.marks[issue.key] = newest || now
+  if (seen.flags) delete seen.flags[issue.key]
   return bound(seen)
 }
 
 /**
- * Unread again: the mark just before the newest counted activity of others. Throws when there is
- * none (nothing to be unread about).
+ * Unread again, on any issue: a flag (unread until opened or marked read), and when others did
+ * something, the mark just before their newest activity, so that shows as "new" again.
  */
 function markUnread(seen, issue, lane) {
   const newest = newestCounted(issue, lane)
-  if (!newest) throw new Error(`${issue.key}: nothing from others on this issue to mark unread`)
-  seen.marks[issue.key] = newest - 1
+  if (newest) seen.marks[issue.key] = newest - 1
+  if (!seen.flags) seen.flags = {}
+  seen.flags[issue.key] = true
   return bound(seen)
+}
+
+/** The person marked it unread themselves (Mark unread) and has not opened it since. */
+function isFlagged(seen, key) {
+  return Boolean(seen && seen.flags && seen.flags[key])
 }
 
 /** At most MAX_MARKS marks: the oldest ones go first (issues nobody touched for long). */
@@ -93,7 +106,12 @@ function bound(seen, max = MAX_MARKS) {
   if (keys.length <= max) return seen
   keys.sort((a, b) => seen.marks[a] - seen.marks[b])
   for (const k of keys.slice(0, keys.length - max)) delete seen.marks[k]
+  // Flags: the same cap; a flag on an issue that lost its mark goes too (it left the lanes long ago).
+  if (seen.flags) {
+    const flagged = Object.keys(seen.flags)
+    if (flagged.length > max) for (const k of flagged.slice(0, flagged.length - max)) delete seen.flags[k]
+  }
   return seen
 }
 
-module.exports = { emptySeen, loadSeen, newEvents, isUnread, newestCounted, seed, markRead, markUnread, bound, MAX_MARKS }
+module.exports = { emptySeen, loadSeen, newEvents, isUnread, isFlagged, newestCounted, seed, markRead, markUnread, bound, MAX_MARKS }

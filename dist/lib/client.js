@@ -17,7 +17,8 @@ const SEARCH_PAGE = 100
 const COMMENT_PAGE = 100
 const MAX_COMMENTS = 500
 const MAX_HISTORIES = 500
-const ISSUE_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,description,comment,project,attachment'
+// labels .. parent: only for the details column of the issue view (lib/document.js issueDetails).
+const ISSUE_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,description,comment,project,attachment,labels,components,fixVersions,duedate,resolution,parent'
 
 /**
  * @param {object} o

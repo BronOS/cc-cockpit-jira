@@ -61,12 +61,22 @@ test('mark read: up to the newest activity of others; unread: just before it', (
   assert.deepEqual(S.newEvents(i, seen.marks['ABC-1'], 'inProgress').map((e) => e.id), ['c101'])
 })
 
-test('mark read of an issue with nothing from others uses now; mark unread refuses', () => {
+test('mark read of an issue with nothing from others uses now; mark unread flags it, read clears the flag', () => {
   const seen = S.emptySeen('s', ME)
   const i = compact(fixture('issue-ABC-2.json'), ME)
   S.markRead(seen, i, 999)
   assert.equal(seen.marks['ABC-2'], 999)
-  assert.throws(() => S.markUnread(seen, i, 'backlog'), /nothing from others/)
+  S.markUnread(seen, i, 'backlog')
+  assert.equal(seen.marks['ABC-2'], 999, 'no activity of others: the mark stays')
+  assert.equal(S.isFlagged(seen, 'ABC-2'), true)
+  S.markRead(seen, i, 1000)
+  assert.equal(S.isFlagged(seen, 'ABC-2'), false)
+})
+
+test('flags survive a reload of the stored state; an old state without flags loads with none', () => {
+  const stored = { site: 's', accountId: ME, seeded: true, marks: { 'A-1': 5 }, flags: { 'A-1': true } }
+  assert.equal(S.isFlagged(S.loadSeen(stored, 's', ME), 'A-1'), true)
+  assert.deepEqual(S.loadSeen({ ...stored, flags: undefined }, 's', ME).flags, {})
 })
 
 test('marks of another site or account are not reused', () => {

@@ -17,7 +17,7 @@ const { assignedJql, doneJql, mentionedJql, SEARCH_FIELDS, DONE_FIELDS, CAPS } =
 const { header, compact } = require('./model')
 const { statusLane, sortRows, LANES } = require('./lanes')
 const { mapLimit } = require('./util')
-const { newEvents } = require('./seen')
+const { newEvents, isFlagged } = require('./seen')
 
 const CONCURRENCY = 4
 const BUDGET = 120
@@ -166,7 +166,8 @@ function buildView(o) {
   const row = (issue, lane) => {
     const mark = seen.marks[issue.key]
     const fresh = issue.full ? newEvents(issue, mark, lane) : []
-    return { issue, lane, mark, unread: fresh.length > 0, newCount: fresh.length, verdict: verdicts[issue.key] || null }
+    // Unread: others did something since the mark, or the person flagged it (Mark unread).
+    return { issue, lane, mark, unread: fresh.length > 0 || isFlagged(seen, issue.key), newCount: fresh.length, verdict: verdicts[issue.key] || null }
   }
   for (const h of (lists && lists.assigned) || []) {
     const lane = statusLane(h, cfg.onHold)

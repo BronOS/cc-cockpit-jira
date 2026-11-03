@@ -8,6 +8,8 @@ to discuss. It is **read-only towards Jira**: it never comments, transitions or 
 - **Unread**: Jira has no read state, so the plugin keeps its own. An issue is unread while someone
   else commented, changed its status / assignee / priority, assigned it to you or mentioned you
   after you last looked. The first run marks everything as seen, so only what happens next is new.
+  Unread rows have an accent bar, bold text and a "new" / "N new" pill. **Mark unread** works on any
+  issue (except Done) as a reminder ("unread" pill), cleared when you open it; it does not change triage.
 - **Triage**: each lane is sorted by priority (urgent, action, fyi, noise), then the newest
   activity. Simple cases are decided by the plugin's own hints (Done is noise, an unread High
   issue is urgent, ...); the rest is judged by Jev through jev-triage.
@@ -92,8 +94,8 @@ stays in its own lane, marked unread. Issues are read in full only when their `u
 
 **Click a row** (or press Enter on it) to open the issue (see below); opening marks it read. The
 other actions are small buttons that show while the pointer is over a row or the row has the
-keyboard focus: **↗** (the issue in your browser), **Read / Unread**, **Wrong?** (correct the triage
-priority; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel), **Discuss**
+keyboard focus: **↗** (the issue in your browser), **Read / Unread**, the triage verdict (**action ▾**: change how much
+the issue needs you; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel), **Discuss**
 (sends the issue to the Claude tab you are looking at; with several tabs and no way to tell, you
 pick one) and **New** (a new Claude session about it). Keyboard: Tab to a row, ↑ / ↓ (Home / End)
 move between rows, Enter or Space opens, Tab goes on to the row's buttons.

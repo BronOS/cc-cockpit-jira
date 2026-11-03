@@ -1,14 +1,14 @@
 'use strict'
 // The Jira panel: lanes of issues as the host sends them (`{ type: 'state', ... }`), actions
 // posted back as `{ type, key }`. The page keeps no data of its own (an opaque origin has no
-// storage) except which row's Wrong? chooser is open. Every text from Jira goes in through
+// storage) except which row's triage chooser is open. Every text from Jira goes in through
 // textContent, never as markup: an issue summary is untrusted.
 //
 // A click on a row (or Enter on a focused row) opens the issue; the other actions are small
 // buttons shown on hover or focus (rowlogic.js, loaded before this file, decides which).
 
 let state = null
-let wrongOpen = null // the key whose Wrong? chooser is shown
+let wrongOpen = null // the key whose triage chooser is shown
 
 const $ = (id) => document.getElementById(id)
 
@@ -112,14 +112,26 @@ function onRowKey(ev, r, li) {
   if (to !== null) rows[to].focus()
 }
 
+// The four triage levels in words, for the chooser: the names alone (fyi, noise) mean little to
+// someone new.
+const LEVELS = [
+  ['urgent', 'needs you now'],
+  ['action', 'you have something to do'],
+  ['fyi', 'worth reading, nothing to do'],
+  ['noise', 'not for you'],
+]
+
 function wrongBox(r) {
   const w = el('div', { class: 'wrong' })
-  w.append(el('span', { class: 'muted', text: 'Should be:' }))
-  for (const p of ['urgent', 'action', 'fyi', 'noise']) {
-    w.append(button(p, () => { wrongOpen = null; post('wrong', { key: r.key, priority: p }) }, `Store a correction: ${p}`))
+  const now = r.verdict && r.verdict.priority
+  w.append(el('span', { class: 'muted', text: 'How much does this need you?' }))
+  for (const [p, words] of LEVELS) {
+    const b = button(p, () => { wrongOpen = null; post('wrong', { key: r.key, priority: p }) }, `${p}: ${words}`)
+    if (p === now) b.classList.add('current')
+    w.append(b)
   }
-  if (r.verdict && r.verdict.by === 'override') w.append(button('Undo', () => { wrongOpen = null; post('undoWrong', { key: r.key }) }, 'Forget your correction'))
-  w.append(el('span', { class: 'muted', text: 'A note for the eval: Wrong? in the Jev triage panel.' }))
+  if (r.verdict && r.verdict.by === 'override') w.append(button('Undo', () => { wrongOpen = null; post('undoWrong', { key: r.key }) }, 'Forget your choice and let triage decide again'))
+  w.append(el('span', { class: 'muted', text: 'Your choice is kept, and Jev triage learns from it (say why in its panel).' }))
   return w
 }
 
@@ -139,7 +151,12 @@ function renderRow(r) {
   li.addEventListener('keydown', (ev) => onRowKey(ev, r, li))
   const line = el('div', { class: 'line' })
   line.append(dot(r.verdict), el('span', { class: 'key', text: r.key }), el('span', { class: 'summary', text: r.summary }))
-  if (r.unread) line.append(el('span', { class: 'new', text: r.newCount > 1 ? `${r.newCount} new` : 'new', title: 'Unread: activity of others since you last looked' }))
+  if (r.unread) {
+    // "unread" alone: the person marked it themselves and nobody else did anything since.
+    const text = r.newCount > 1 ? `${r.newCount} new` : r.newCount === 1 ? 'new' : 'unread'
+    const title = r.newCount ? 'Unread: activity of others since you last looked' : 'Marked unread by you; opening it clears that'
+    line.append(el('span', { class: 'new', text, title }))
+  }
   li.append(line)
   const sub = el('div', { class: 'sub' })
   sub.append(el('span', { text: r.status }))
@@ -207,6 +224,9 @@ function render() {
   if (!state) return
   const spot = focusSpot()
   const who = state.account ? ` · ${state.account}` : ''
+  // On cc-cockpit 0.9.0+ the title bar carries this line (the host sets it); the page's own goes.
+  // (style, not `hidden`: the header's own display: flex would win over the attribute)
+  document.querySelector('body > header').style.display = state.coreHeader ? 'none' : ''
   $('meta').textContent = state.ready ? `${state.polling ? 'polling… · ' : ''}${ago(state.lastPoll)}${who}` : ''
   $('meta').title = state.site || ''
   $('refresh').disabled = !state.ready || state.polling

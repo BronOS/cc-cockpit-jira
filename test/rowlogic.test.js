@@ -33,11 +33,18 @@ test('a click opens unless it was on a control or the person selected text', () 
   assert.equal(rowClickOpens(false, true), false)
 })
 
-test('the hover buttons: ↗, read or unread, Wrong? (triage on, not Done), Discuss, New', () => {
+test('the hover buttons: ↗, read or unread, the triage verdict (triage on, not Done), Discuss, New', () => {
   const ids = (r, s) => rowButtons(r, s).map((b) => b.action)
   assert.deepEqual(ids({ unread: true, canUnread: true, lane: 'inProgress' }, { triageOn: true }), ['browser', 'read', 'wrong', 'discuss', 'newSession'])
   assert.deepEqual(ids({ unread: false, canUnread: true, lane: 'backlog' }, { triageOn: false }), ['browser', 'unread', 'discuss', 'newSession'])
   assert.deepEqual(ids({ unread: false, canUnread: false, lane: 'done' }, { triageOn: true }), ['browser', 'discuss', 'newSession'])
   for (const b of rowButtons({ unread: true, lane: 'x' }, { triageOn: true })) assert.ok(b.label && b.title, 'every button has a label and a title')
   assert.ok(!rowButtons({ unread: true, lane: 'x' }, { triageOn: true }).some((b) => b.action === 'open'), 'Open is the row itself')
+})
+
+test('the triage button says what triage decided, not "Wrong?"', () => {
+  const t = (r) => rowButtons({ unread: false, lane: 'backlog', ...r }, { triageOn: true }).find((b) => b.action === 'wrong')
+  assert.equal(t({ verdict: { priority: 'action' } }).label, 'action ▾')
+  assert.match(t({ verdict: { priority: 'action' } }).title, /Triage says action/)
+  assert.equal(t({}).label, 'triage ▾')
 })

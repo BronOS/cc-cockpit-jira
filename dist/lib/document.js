@@ -4,7 +4,7 @@
 // description, the comments oldest first as cards (the ones after the person's seen mark get
 // `.new`), and the attachments. Everything goes through adfhtml's escaping; this file writes only
 // fixed markup around it, with the classes the reviewer's allow-list keeps (card, card-header,
-// meta, new, status, lozenge, attachment-list).
+// meta, new, lozenge and lozenge-<tone>, facts, person, attachment-list).
 //
 // Size: the reviewer takes at most 2 MiB of html. A description over 1 MB of markup becomes its
 // plain text (cut), and when the comments do not fit the oldest ones give way first, with a line
@@ -70,7 +70,8 @@ function issueDocument(o) {
 
   const parts = []
   if (o.note) parts.push(`<p><em>${esc(o.note)}</em></p>`)
-  parts.push(headerCard(issue))
+  // With a details column (o.aside) the facts live there and the body starts with the title alone.
+  parts.push(o.aside ? `<div class="card"><h1>${esc(issue.key)}: ${esc(issue.summary || '')}</h1></div>` : headerCard(issue, o.lane))
 
   // Description.
   parts.push('<h2>Description</h2>')
@@ -115,19 +116,88 @@ function issueDocument(o) {
   }
   const att = tail()
   if (att) parts.push(att)
-  return { html: parts.join('\n'), inlined, omittedComments: omitted }
+  return { html: parts.join('\n'), inlined, omittedComments: omitted, ...(o.aside ? { aside: issueDetails(issue, raw, o.lane, site) } : {}) }
 }
 
-function headerCard(i) {
+/**
+ * The tone of a status pill: Done green, In progress blue, On hold (the person's onHoldStatuses,
+ * which put the issue in that lane) amber, anything else (To Do) neutral.
+ */
+function statusTone(i, lane) {
+  if (lane === 'onHold') return 'warning'
+  if (i.category === 'done') return 'success'
+  if (i.category === 'indeterminate') return 'info'
+  return 'neutral'
+}
+
+/**
+ * The tone of a priority pill from its name. Jira sites rename priorities freely ("1-Critical",
+ * "P2", "Blocker"), so the name is matched loosely: a leading number counts (1 highest), then words.
+ */
+function priorityTone(name) {
+  const p = String(name || '').trim().toLowerCase()
+  const n = /^p?([1-5])\b/.exec(p)
+  if (n) return ['danger', 'warning', 'info', 'neutral', 'neutral'][Number(n[1]) - 1]
+  if (/highest|critical|blocker|urgent/.test(p)) return 'danger'
+  if (/high|major/.test(p)) return 'warning'
+  if (/medium|normal/.test(p)) return 'info'
+  return 'neutral'
+}
+
+/**
+ * The header card: key and summary as the h1 (the reviewer puts its open-in-browser icon after it),
+ * then what matters most as pills in a `dl.facts` grid (status, priority, assignee), then the rest
+ * as one muted line. Only classes the reviewer's allow-list keeps (cc-cockpit 0.9.1+: facts,
+ * lozenge-<tone>, person); an older reviewer drops the new classes and shows plain text, which reads fine.
+ */
+/**
+ * The details column (reviewer `aside`, cc-cockpit 0.9.1+): every attribute worth a glance, as one
+ * `dl.facts` (the reviewer draws it as a vertical list there). Status, priority and assignee first
+ * and toned like the header card; then the rest, each only when the issue has it. Read from the raw
+ * fields of the fresh read (labels .. parent are fetched for this alone, client.js ISSUE_FIELDS).
+ */
+function issueDetails(i, raw, lane, site) {
+  const f = (raw && raw.fields) || {}
+  const names = (list) => (Array.isArray(list) ? list.map((x) => (x && typeof x.name === 'string' ? x.name : '')).filter(Boolean) : [])
+  const row = (label, value) => (value ? `<dt>${esc(label)}</dt><dd>${value}</dd>` : '')
+  const pills = (list) => list.map((x) => `<span class="lozenge lozenge-neutral">${esc(x)}</span>`).join(' ')
+  const labels = Array.isArray(f.labels) ? f.labels.filter((x) => typeof x === 'string' && x) : []
+  const parent = f.parent && typeof f.parent.key === 'string' ? f.parent : null
+  const parentLink = parent
+    ? `<a href="${esc(`${site}/browse/${encodeURIComponent(parent.key)}`)}">${esc(parent.key)}</a>${parent.fields && parent.fields.summary ? ` ${esc(parent.fields.summary)}` : ''}`
+    : ''
+  const project = f.project && f.project.name ? `${esc(f.project.name)} (${esc(f.project.key || i.project)})` : esc(i.project || '')
+  return [
+    '<dl class="facts">',
+    row('Status', i.status ? `<span class="lozenge lozenge-${statusTone(i, lane)}">${esc(i.status)}</span>` : ''),
+    row('Priority', i.priority ? `<span class="lozenge lozenge-${priorityTone(i.priority)}">${esc(i.priority)}</span>` : ''),
+    row('Assignee', i.assignee ? `<span class="person">${esc(i.assignee)}</span>` : '<em>Unassigned</em>'),
+    row('Reporter', i.reporter ? esc(i.reporter) : ''),
+    row('Type', esc(i.type || '')),
+    row('Project', project),
+    row('Parent', parentLink),
+    row('Labels', pills(labels)),
+    row('Components', pills(names(f.components))),
+    row('Fix versions', pills(names(f.fixVersions))),
+    row('Due', typeof f.duedate === 'string' ? esc(f.duedate) : ''),
+    row('Resolution', f.resolution && f.resolution.name ? esc(f.resolution.name) : ''),
+    row('Created', i.created ? esc(stamp(i.created)) : ''),
+    row('Updated', i.updatedAt ? esc(stamp(i.updatedAt)) : ''),
+    '</dl>',
+  ].join('')
+}
+
+function headerCard(i, lane) {
+  const facts = []
+  if (i.status) facts.push(`<dt>Status</dt><dd><span class="lozenge lozenge-${statusTone(i, lane)}">${esc(i.status)}</span></dd>`)
+  if (i.priority) facts.push(`<dt>Priority</dt><dd><span class="lozenge lozenge-${priorityTone(i.priority)}">${esc(i.priority)}</span></dd>`)
+  facts.push(`<dt>Assignee</dt><dd>${i.assignee ? `<span class="person">${esc(i.assignee)}</span>` : '<em>Unassigned</em>'}</dd>`)
   const meta = []
   if (i.type) meta.push(esc(i.type))
-  if (i.status) meta.push(`<span class="status lozenge">${esc(i.status)}</span>`)
-  if (i.priority) meta.push(`Priority: ${esc(i.priority)}`)
-  meta.push(`Assignee: ${esc(i.assignee || 'unassigned')}`)
   if (i.reporter) meta.push(`Reporter: ${esc(i.reporter)}`)
   if (i.created) meta.push(`Created ${esc(stamp(i.created))}`)
   if (i.updatedAt) meta.push(`Updated ${esc(stamp(i.updatedAt))}`)
-  return `<div class="card"><h1>${esc(i.key)}: ${esc(i.summary || '')}</h1>\n<div class="meta">${meta.join(' · ')}</div></div>`
+  return `<div class="card"><h1>${esc(i.key)}: ${esc(i.summary || '')}</h1>\n<dl class="facts">${facts.join('')}</dl>\n<div class="meta">${meta.join(' · ')}</div></div>`
 }
 
 /** `{ id, by, at, body }` oldest first: ADF bodies from the raw issue, else the kept text. */
@@ -160,4 +230,4 @@ function attachmentsHtml(attachments, assets, inlined, site) {
   return `<h2>Attachments (${attachments.length})</h2>\n<ul class="attachment-list">${items.join('')}</ul>`
 }
 
-module.exports = { issueDocument, attachmentUrl, fmtSize, HTML_MAX_BYTES }
+module.exports = { issueDetails, issueDocument, attachmentUrl, fmtSize, HTML_MAX_BYTES, statusTone, priorityTone }

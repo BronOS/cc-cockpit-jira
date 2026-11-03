@@ -30,7 +30,9 @@ subcommand (`ccc jira` declares no stdin); no way to see a panel from a session;
   `dist/lib/actions.js`) and remember the result for the run; a message reworded in the app would
   turn every Open into an error notice. Would help: `available(name, method)` or a minor version.
 
-- **`api` / `panels`: no way to open a URL in the system browser.** Open.
+- **`api` / `panels`: no way to open a URL in the system browser.** Fixed in cc-cockpit 0.9.1
+  (`ctx.openExternal`). Found in real use: the xdg-open workaround failed on Linux, because a plugin
+  host's environment has no DISPLAY / WAYLAND_DISPLAY / XDG_CURRENT_DESKTOP, so xdg-open found no browser.
   Needed: the row's ↗ (the issue on the Jira site). Guide: the `webview` topic says `window.open`
   and `target="_blank"` there go to the system browser, and `ctx.oauth` opens it for sign-in; for an
   html panel or overlay page nothing says what a link does (the sandbox allows scripts only), and

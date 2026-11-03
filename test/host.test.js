@@ -9,7 +9,8 @@ const { fakeJira, fakeCtx, fakeTriage, fixture, picture, SITE, MEDIA, NOW, CONFI
 function boot(opts = {}) {
   const jira = fakeJira(opts.jira)
   const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer, sessions: opts.sessions, overlayAnswer: opts.overlayAnswer, overlayWait: opts.overlayWait })
-  const h = host._start(ctx, { fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs })
+  if (opts.header) Object.assign(ctx.panels, opts.header)
+  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs })
   return { jira, ctx, h, triage: ctx.services && opts.triage === undefined ? null : opts.triage }
 }
 const lane = (st, id) => st.lanes.find((l) => l.id === id)
@@ -321,9 +322,16 @@ test('CLI: list, show, read and unread', async () => {
   // Unread and High: the urgent hint.
   assert.match((await ctx.runCli(['list', 'inProgress'])).stdout, /\* U ABC-1/)
   assert.equal((await ctx.runCli(['read', 'ABC-1'])).code, 0)
-  const r = await ctx.runCli(['unread', 'ABC-2'])
-  assert.equal(r.code, 1)
-  assert.match(r.stderr, /nothing from others/)
+  // Nothing from others on ABC-2: unread still works, as the person's own flag, and the panel
+  // offers it (canUnread) on every lane but Done.
+  assert.equal((await ctx.runCli(['unread', 'ABC-2'])).code, 0)
+  const row = ctx.lastState().lanes.flatMap((l) => l.rows).find((x) => x.key === 'ABC-2')
+  assert.equal(row.unread, true)
+  assert.equal(row.newCount, 0)
+  assert.equal(row.canUnread, true)
+  assert.match((await ctx.runCli(['list'])).stdout, /\* . ABC-2/)
+  assert.equal((await ctx.runCli(['read', 'ABC-2'])).code, 0)
+  assert.equal(ctx.lastState().lanes.flatMap((l) => l.rows).find((x) => x.key === 'ABC-2').unread, false)
   assert.match((await ctx.runCli(['read', 'NOPE-1'])).stderr, /not in the lanes/)
   await h.stop()
 })
@@ -391,5 +399,85 @@ test('the panel toggle remembers a collapsed lane', async () => {
   await ctx.sendPanel({ type: 'toggle', lane: 'backlog' })
   assert.equal(lane(ctx.lastState(), 'backlog').collapsed, true)
   assert.deepEqual(await ctx.storage.get('ui'), { collapsed: { backlog: true }, expanded: {} })
+  await h.stop()
+})
+
+test('title bar: with ctx.panels.header the host sets the last poll and a Refresh action, and a click polls', async () => {
+  const headers = []
+  const actions = []
+  const { ctx, h, jira } = boot({
+    header: {
+      header: (panel, spec) => headers.push(structuredClone(spec)),
+      onAction: (panel, fn) => {
+        actions.push(fn)
+        return () => {}
+      },
+    },
+  })
+  await h.pollNow('test')
+  const last = headers[headers.length - 1]
+  assert.match(last.meta, /just now/)
+  assert.deepEqual(last.actions.map((a) => [a.id, a.icon, a.busy, a.disabled]), [['refresh', 'refresh', false, false]])
+  assert.equal(ctx.lastState().coreHeader, true)
+  // An unchanged header is not sent again.
+  const n = headers.length
+  await ctx.sendPanel({ type: 'hello' })
+  assert.equal(headers.length, n)
+  assert.equal(actions.length, 1)
+  const calls = jira.calls ? jira.calls.length : null
+  actions[0]('refresh')
+  assert.equal(headers[headers.length - 1].actions[0].busy, true, 'the icon spins while the poll runs')
+  await h.S.polling
+  if (calls !== null) assert.ok(jira.calls.length > calls)
+  await h.stop()
+})
+
+test('title bar: without ctx.panels.header (cc-cockpit 0.8) the page keeps its own line', async () => {
+  const { ctx, h } = boot()
+  await h.pollNow('test')
+  assert.equal(ctx.lastState().coreHeader, false)
+  await h.stop()
+})
+
+test('↗ goes through ctx.openExternal when the app has it (0.9.1+), not xdg-open', async () => {
+  const opened = []
+  const { ctx, h } = boot()
+  ctx.openExternal = async (url) => {
+    opened.push(url)
+  }
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'browser', key: 'ABC-1' })
+  assert.deepEqual(opened, [`${SITE}/browse/ABC-1`])
+  assert.equal(ctx.execs.length, 0)
+  ctx.openExternal = async () => {
+    throw new Error('at most 3 links in 10 seconds')
+  }
+  await ctx.sendPanel({ type: 'browser', key: 'ABC-1' })
+  assert.match(ctx.lastState().notice.text, /at most 3 links/)
+  await h.stop()
+})
+
+test('with ctx.openExternal (cc-cockpit 0.9.1+) the issue goes with a details column; the body keeps the title alone', async () => {
+  const calls = []
+  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
+  const { ctx, h } = boot({ reviewer })
+  ctx.openExternal = async () => {}
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].aside, /^<dl class="facts"><dt>Status<\/dt>/)
+  assert.match(calls[0].html, /^<div class="card"><h1>ABC-1: [^<]+<\/h1><\/div>\n/)
+  assert.doesNotMatch(calls[0].html, /class="facts"/)
+  await h.stop()
+})
+
+test('without ctx.openExternal (0.9.0 and older) no aside is sent and the facts stay in the header card', async () => {
+  const calls = []
+  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
+  const { ctx, h } = boot({ reviewer })
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(calls[0].aside, undefined)
+  assert.match(calls[0].html, /<dl class="facts">/)
   await h.stop()
 })

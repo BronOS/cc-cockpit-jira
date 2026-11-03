@@ -1,7 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { issueDocument, attachmentUrl, fmtSize, HTML_MAX_BYTES } = require('../dist/lib/document')
+const { issueDetails, issueDocument, attachmentUrl, fmtSize, HTML_MAX_BYTES, statusTone, priorityTone } = require('../dist/lib/document')
 const { compact } = require('../dist/lib/model')
 const { fixture, ME, SITE } = require('./fakes')
 
@@ -18,10 +18,10 @@ function withAttachments() {
   return raw
 }
 
-test('the header card: key and summary as h1, then type, status lozenge, priority, people, dates', () => {
+test('the header card: key and summary as h1, then status, priority and assignee as facts, then the rest', () => {
   const raw = fixture('issue-ABC-1.json')
   const { html } = issueDocument({ issue: compact(raw, ME, 'full'), raw, site: SITE })
-  assert.match(html, /^<div class="card"><h1>ABC-1: Checkout fails for EU cards<\/h1>\n<div class="meta">Bug · <span class="status lozenge">In Progress<\/span> · Priority: High · Assignee: Oleg Example · Reporter: Ann Smith · Created \d{4}-\d\d-\d\d \d\d:\d\d · Updated /)
+  assert.match(html, /^<div class="card"><h1>ABC-1: Checkout fails for EU cards<\/h1>\n<dl class="facts"><dt>Status<\/dt><dd><span class="lozenge lozenge-info">In Progress<\/span><\/dd><dt>Priority<\/dt><dd><span class="lozenge lozenge-warning">High<\/span><\/dd><dt>Assignee<\/dt><dd><span class="person">Oleg Example<\/span><\/dd><\/dl>\n<div class="meta">Bug · Reporter: Ann Smith · Created \d{4}-\d\d-\d\d \d\d:\d\d · Updated /)
   assert.match(html, /<h2>Description<\/h2>\n<p>Customers with EU cards get <code>PAYMENT_DECLINED<\/code> at checkout.<\/p>/)
   assert.match(html, /<pre><code>\{&quot;code&quot;: 402\}<\/code><\/pre>/)
 })
@@ -109,4 +109,46 @@ test('attachmentUrl and fmtSize', () => {
   assert.equal(fmtSize(716800), '700 KB')
   assert.equal(fmtSize(3.1 * 1024 * 1024), '3.1 MB')
   assert.equal(fmtSize(null), '')
+})
+
+test('status and priority tones: On hold lane amber, Done green; priority names matched loosely', () => {
+  assert.equal(statusTone({ category: 'indeterminate' }, 'onHold'), 'warning')
+  assert.equal(statusTone({ category: 'done' }, 'done'), 'success')
+  assert.equal(statusTone({ category: 'new' }, 'backlog'), 'neutral')
+  for (const [name, tone] of [['1-Critical', 'danger'], ['Highest', 'danger'], ['Blocker', 'danger'], ['P2', 'warning'], ['High', 'warning'], ['3-Medium', 'info'], ['Medium', 'info'], ['Low', 'neutral'], ['5-Trivial', 'neutral'], ['', 'neutral']]) {
+    assert.equal(priorityTone(name), tone, name)
+  }
+})
+
+test('an unassigned issue says so in the facts', () => {
+  const raw = fixture('issue-ABC-1.json')
+  const issue = { ...compact(raw, ME, 'full'), assignee: '' }
+  assert.match(issueDocument({ issue, raw, site: SITE }).html, /<dt>Assignee<\/dt><dd><em>Unassigned<\/em><\/dd>/)
+})
+
+test('the details column: toned facts first, then each attribute the issue has, escaped; parent as a link', () => {
+  const raw = fixture('issue-ABC-1.json')
+  const issue = compact(raw, ME, 'full')
+  const extra = {
+    ...raw,
+    fields: {
+      ...raw.fields,
+      labels: ['payments', '<b>x</b>'],
+      components: [{ name: 'Checkout' }],
+      fixVersions: [{ name: '1.7.10' }],
+      duedate: '2026-11-20',
+      parent: { key: 'ABC-0', fields: { summary: 'EU launch' } },
+      resolution: null,
+    },
+  }
+  const html = issueDetails(issue, extra, 'inProgress', SITE)
+  assert.match(html, /^<dl class="facts"><dt>Status<\/dt><dd><span class="lozenge lozenge-info">In Progress<\/span><\/dd><dt>Priority<\/dt>/)
+  assert.match(html, /<dt>Labels<\/dt><dd><span class="lozenge lozenge-neutral">payments<\/span> <span class="lozenge lozenge-neutral">&lt;b&gt;x&lt;\/b&gt;<\/span><\/dd>/)
+  assert.match(html, /<dt>Components<\/dt><dd><span class="lozenge lozenge-neutral">Checkout<\/span><\/dd>/)
+  assert.match(html, /<dt>Due<\/dt><dd>2026-11-20<\/dd>/)
+  assert.ok(html.includes(`<dt>Parent</dt><dd><a href="${SITE}/browse/ABC-0">ABC-0</a> EU launch</dd>`))
+  assert.doesNotMatch(html, /Resolution/)
+  const { aside, html: body } = issueDocument({ issue, raw: extra, site: SITE, aside: true })
+  assert.equal(aside, issueDetails(issue, extra, undefined, SITE))
+  assert.doesNotMatch(body, /class="facts"/)
 })

@@ -73,3 +73,10 @@ test('the text stays far below jev-triage\'s 200,000 characters on a huge issue'
   const t = triageText(compact(raw, ME), { mode: 'full', lane: 'inProgress' })
   assert.ok(t.length < 20000, String(t.length))
 })
+
+test('a row the person flagged unread (no activity of others) is judged like a read one', () => {
+  const read = triageItem({ issue: abc1(), lane: 'inProgress', unread: false, newCount: 0, mark: Date.now() }, 'full')
+  const flagged = triageItem({ issue: abc1(), lane: 'inProgress', unread: true, newCount: 0, mark: Date.now() }, 'full')
+  assert.deepEqual(flagged.hint, read.hint)
+  assert.equal(flagged.floor, read.floor)
+})

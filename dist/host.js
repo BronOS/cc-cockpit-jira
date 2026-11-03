@@ -20,6 +20,7 @@ const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
 const { hashOf, oneLine, cut, issueKey } = require('./lib/util')
 const { issueDocument } = require('./lib/document')
+const { headerSpec } = require('./lib/header')
 const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, WAIT_MS } = require('./lib/images')
 const path = require('node:path')
 
@@ -328,7 +329,7 @@ function start(ctx, io = {}) {
     if (!S.seen) throw new Error('no poll yet: the seen marks start with the first poll (ccc jira refresh)')
     const row = rowOf(key)
     const issue = row ? row.issue : S.cache && S.cache.issues[key]
-    if (!issue || !issue.full) throw new Error(`${key} is not in the lanes (only shown issues have a seen mark)`)
+    if (!issue) throw new Error(`${key} is not in the lanes (only shown issues have a seen mark)`)
     if (read) markRead(S.seen, issue, now())
     else markUnread(S.seen, issue, row ? row.lane : 'any')
     await saveSeen()
@@ -368,16 +369,20 @@ function start(ctx, io = {}) {
       postState()
       void classifyChanged()
     }
-    let doc = null
-    const view = async () => (doc = doc || (await issueView(got, staleNote)))
+    // Two builds at most: the reviewer's (with the details column when it takes one) and our own
+    // reader page's (no column: the facts stay in the header card there).
+    const docs = {}
+    const view = async (aside = false) => (docs[aside] = docs[aside] || (await issueView(got, staleNote, aside)))
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
       const base = { title, url, key: `jira:${key}`, ...(pick.tabId ? { tabId: pick.tabId } : {}) }
       let htmlError = null
       if (!S.htmlRejected) {
-        const v = await view()
+        // The details column needs a reviewer with `aside` (cc-cockpit 0.9.1+). No service says which
+        // options it takes, so the app's ctx.openExternal (the same release) stands in for that.
+        const v = await view(typeof ctx.openExternal === 'function')
         try {
-          await reviewer.annotate({ ...base, html: v.html, ...(v.assets.length ? { assets: v.assets } : {}) })
+          await reviewer.annotate({ ...base, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
           return
         } catch (e) {
           if (isMissingAnnotate(e)) {
@@ -421,7 +426,7 @@ function start(ctx, io = {}) {
    * from the cache or downloaded with the token, waited for at most WAIT_MS. With the cached copy
    * (Jira unreachable) only cached images are used.
    */
-  async function issueView({ issue, raw, lane, mark, stale }, note) {
+  async function issueView({ issue, raw, lane, mark, stale }, note, withAside) {
     const attachments = raw ? attachmentsOf(raw) : issue.attachments || []
     const { wanted } = selectImages(attachments)
     let assets = []
@@ -439,8 +444,8 @@ function start(ctx, io = {}) {
       for (const f of r.failed) ctx.log.warn(`image ${f.id} of ${issue.key}: ${f.message}`)
       if (r.late) ctx.log.info(`${issue.key}: ${r.late} image(s) not downloaded in time, shown as links (cached for the next open)`)
     }
-    const { html } = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note })
-    return { html, assets }
+    const doc = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note, aside: Boolean(withAside) })
+    return { html: doc.html, assets, aside: doc.aside }
   }
 
   /**
@@ -509,6 +514,16 @@ function start(ctx, io = {}) {
   /** An http(s) address in the system browser (the ↗ button, a link in the reader page). */
   async function openUrl(url) {
     if (!/^https?:\/\//i.test(url)) return setNotice(`Only web links open from here; the address: ${cut(url, 300)}`)
+    // cc-cockpit 0.9.1+: the app opens it, as it opens any link. A plugin host's environment has
+    // no display or desktop session variables, so xdg-open run from here finds no browser on Linux.
+    if (typeof ctx.openExternal === 'function') {
+      try {
+        await ctx.openExternal(url)
+      } catch (e) {
+        setNotice(`Could not open ${url}: ${e && e.message ? e.message : e}`, 'error')
+      }
+      return
+    }
     const argv = openerArgv(platform, url)
     if (!argv) return setNotice(`Open ${url} in your browser (no opener on this system).`)
     const r = await ctx.exec(argv, { timeoutMs: 15000 })
@@ -544,6 +559,9 @@ function start(ctx, io = {}) {
       account: S.cache && S.cache.me ? S.cache.me.displayName : '',
       lastPoll: S.lastPoll,
       polling: Boolean(S.polling),
+      // The app draws the last poll and Refresh in the panel's title bar (0.9.0+): the page then
+      // leaves out its own line, which would only repeat it.
+      coreHeader,
       error: S.error,
       laneErrors: S.laneErrors,
       deferred: S.stats ? S.stats.deferred : 0,
@@ -579,7 +597,8 @@ function start(ctx, io = {}) {
       lane: x.lane,
       who: x.lane === 'mentioned' ? `mentioned by ${mentionedBy(i) || 'someone'}` : i.assignee || '',
       verdict: x.verdict,
-      canUnread: x.lane !== 'done' && Boolean(i.full) && (i.events || []).some((e) => !e.mine),
+      // Every issue but a Done one can be marked unread (a flag when nobody else did anything).
+      canUnread: x.lane !== 'done',
     }
   }
 
@@ -590,7 +609,33 @@ function start(ctx, io = {}) {
     } catch (e) {
       ctx.log.warn('panel post:', e.message)
     }
+    setHeader()
   }
+
+  // ---- the title bar (cc-cockpit 0.9.0+; feature-detected, so 0.8.x keeps the in-panel line) ----
+
+  const coreHeader = typeof ctx.panels.header === 'function'
+  let lastHeader = ''
+  function setHeader() {
+    if (!coreHeader || S.stopped) return
+    const spec = headerSpec({ ready: S.settings.ready, polling: Boolean(S.polling), lastPoll: S.lastPoll, account: S.cache && S.cache.me ? S.cache.me.displayName : '' }, (io.now || Date.now)())
+    // Every state message calls this (a click, a triage answer): unchanged headers are not resent.
+    const json = JSON.stringify(spec)
+    if (json === lastHeader) return
+    lastHeader = json
+    try {
+      ctx.panels.header(PANEL, spec)
+    } catch (e) {
+      ctx.log.warn('panel header:', e.message)
+    }
+  }
+  if (coreHeader) {
+    ctx.panels.onAction(PANEL, (id) => {
+      if (id === 'refresh') void pollNow('header')
+    })
+  }
+  // "just now" turns into "5 min ago" with nothing else happening.
+  const headerTimer = coreHeader ? (io.setInterval || setInterval)(setHeader, 60000) : null
 
   ctx.panels.onMessage(PANEL, async (m) => {
     if (!m || typeof m !== 'object') return
@@ -714,6 +759,7 @@ function start(ctx, io = {}) {
     stop() {
       S.stopped = true
       abort.abort()
+      if (headerTimer) (io.clearInterval || clearInterval)(headerTimer)
       ;(io.clearTimeout || clearTimeout)(firstPoll)
       if (stopSchedule) stopSchedule()
       return Promise.all([cacheFile.flush().catch(() => {}), images ? images.cache.flush() : null])
