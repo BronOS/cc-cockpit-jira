@@ -133,3 +133,21 @@ built), so its shape is from my brief, not from the guide.
   created on first read; nothing on a quota, whether the app ever cleans it (plugin uninstalled,
   project removed), or whether a big folder is a problem (backups, sync). Did: bound the cache
   myself (300 files, 64 MiB, least recently used first).
+
+## Found building 0.5.0 (the `jira` service for bronos.gmail), 2026-11-03
+
+Against cc-cockpit 0.9.2.
+
+- **`api`: a consumer cannot cancel a service call.** Open.
+  Needed: bronos.gmail gives up on `document(key)` after 15 s (its thread view must open); the work
+  in this plugin (a full issue read, image downloads) then goes on for nobody. Guide: calls carry
+  plain data only (an `AbortSignal` is not cloneable) and have "no timeout: race your own". Did: the
+  consumer races a timer; the provider bounds its own work (the 10 s image wait, at most one document
+  at a time, `lib/service.js`). Would help: the registry passing the consumer's abort into the
+  provider (a `ctx.services.signal()` next to `caller()`, aborted when the consumer's race gives up or
+  its host stops).
+
+- **`api`: `caller()` and async work in tests.** Noted.
+  `caller()` holds through the method's awaits in the app; this repo's fake ctx (no host test kit,
+  see above) can only set it around the synchronous start of a call. Did: read `caller()` before the
+  method's first await and pass it along, which works in both.

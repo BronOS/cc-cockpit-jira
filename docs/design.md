@@ -7,12 +7,14 @@ jev-triage. Read-only towards Jira. 0.3.0: an "Issues per lane" setting with Sho
 poll and Refresh (an icon) in the panel's title bar on cc-cockpit 0.9.0+ (`ctx.panels.header`,
 `lib/header.js`; the page keeps its own line on older apps), and links open through
 `ctx.openExternal` on 0.9.1+ (a plugin host has no display variables, so xdg-open found no browser).
+0.5.0 (2026-11-03, designed with the user together with bronos.gmail 0.2.0): provides the `jira`
+service to other plugins (section "The jira service"); no app change needed.
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
 seen state, hints and floor), and the triage design in `~/Projects/cc-cockpit-jev-triage/docs/design.md`.
 
-Manifest: `services: { uses: { triage: 1, reviewer: 1 } }`; a panel (left or right zone, the
+Manifest: `services: { provides: { jira: 1 }, uses: { triage: 1, reviewer: 1 } }`; a panel (left or right zone, the
 person's choice; default right) with lanes; CLI `ccc jira`.
 
 ## Auth and settings (project scope: a work project and a personal one use different sites)
@@ -40,6 +42,9 @@ person's choice; default right) with lanes; CLI `ccc jira`.
   does nothing).
 - `triageText`: `full` (default: description and comments go to Jev) or `summary` (only key,
   summary, status, priority, type: for employers who object to issue text leaving).
+- `mailSenders` (0.5.0): the addresses the site's notification mails come from, for the `jira`
+  service; empty = Jira Cloud's own sender `jira@<site host>`, derived from `site` (nothing
+  site-specific in the code). Lower-cased, at most 10; a bad one is a problem line, skipped.
 
 ## Fetching (Jira Cloud REST v3)
 
@@ -168,6 +173,42 @@ errors (auth, network) as a notice.
 - `ccc jira show`, Discuss, New session and triage keep the plain text (`readableText`,
   `triageText`).
 
+## The jira service (v1, 0.5.0)
+
+`ctx.services.provide('jira', { site, issue, document })` in activate. The first consumer is
+bronos.gmail (Jira mail: triage hints, the issue below the mail); any plugin of the project can
+use it. A call is a plain call inside the plugin host (`ccc guide api`, services: no rate, size or
+time limit from the app), so this plugin checks and caps its callers itself (`lib/service.js`):
+
+- `site()` -> `{ ready, site, senders, account }` (`account` `{ accountId, displayName }` once a
+  poll or a lookup read `myself`, else null; not configured: `ready: false`, `senders: []`,
+  `error`). Never rejects; reads nothing from Jira.
+- `issue(key, { maxAgeMs? })` -> `{ key, summary, status, category, done, priority, type,
+  assignee, mine, lane, url, updatedAt, source, at }`. `maxAgeMs` (default 300,000, clamped to
+  15,000..3,600,000) is how old an answer may be: the last poll's search header when the poll is
+  that recent and lists the key (`source: 'poll'`, no request), else the service's own cache of
+  earlier answers (300 keys, least recently set out), else `GET /rest/api/3/issue/<key>?fields=`
+  the search's header fields only (no comments, no changelog; `source: 'fetch'`). Two calls for
+  one key at once share the request. 404 / 403 answers are cached as the error for 5 minutes;
+  network failures and refusals are not. `lane`: the panel row's lane, else `statusLane` when
+  the issue is the person's, else null. A settings change empties the cache.
+- `document(key, { maxHtmlBytes?, maxImages?, maxImageChars?, waitMs? })` -> `{ key, title, url,
+  html, aside, assets, stale? }`: `fullIssue` (fresh read, cached copy on failure) and `issueView`
+  with the details column, exactly the reviewer's document. The options can only lower the
+  plugin's own budgets (2,000,000 bytes, 15 images, 7.5 MiB of data URLs, 10 s wait): `issueDocument`
+  takes `maxBytes` (the description at most half of it, else its text, else a note), `selectImages`
+  / `gatherImages` the image count and total. Not marked read: another plugin showing the issue is
+  not the person opening it here.
+- Keys: a string of at most 64 characters with the `issueKey` shape (`[A-Z][A-Z0-9_]{0,49}-[1-9][0-9]{0,9}`,
+  upper-cased), else `jira: not an issue key`. Options must be an object.
+- Limits: lookups that reach Jira (myself + header) at most 2 at a time, 20 waiting, 30 started a
+  minute; documents 1 at a time, 3 waiting, 6 a minute. Past that a call is refused at once (`jira:
+  busy ...`, `jira: too many ... a minute`), with a log line naming `ctx.services.caller()` (read
+  before the method's first await). Errors are thrown as `jira: <message>`; the client's messages
+  carry no token.
+- Not configured: `issue` and `document` reject with `jira: the Jira plugin is not configured in
+  this project (<missing fields>)`.
+
 ## CLI
 
 `ccc jira status` (site, account, last poll, counts per lane, errors), `ccc jira refresh`,
@@ -175,6 +216,9 @@ errors (auth, network) as a notice.
 `ccc jira help`. No stdin.
 
 ## Left out of v1
+
+The `jira` service has no events (a consumer asks again when it needs to; bronos.gmail caches its
+answers with a TTL), and no write methods (the plugin stays read-only).
 
 Writing to Jira (comments, transitions), Jira Server/DC (PAT), OAuth. Since 0.2.0 attachments
 are shown (images inline, the rest as links) but not scaled down: a picture over 700 KiB is a

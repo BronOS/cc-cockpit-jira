@@ -1,10 +1,10 @@
 {
   "id": "bronos.jira",
   "name": "Jira",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Read-only towards Jira.",
+  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Read-only towards Jira. Provides the jira service (issue status, the issue view) to other plugins, such as bronos.gmail.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -114,6 +114,14 @@
             "maximum": 1440,
             "default": 3
           },
+          "mailSenders": {
+            "type": "array",
+            "title": "Notification senders",
+            "description": "The addresses Jira's notification mails come from, for other plugins (Gmail) to recognise them. Empty: jira@<your site's host>, Jira Cloud's own sender.",
+            "maxItems": 10,
+            "items": { "type": "string", "title": "Address", "maxLength": 254 },
+            "default": []
+          },
           "triageText": {
             "type": "string",
             "title": "What triage reads",
@@ -136,6 +144,9 @@
     ]
   },
   "services": {
+    "provides": {
+      "jira": 1
+    },
     "uses": {
       "triage": 1,
       "reviewer": 1

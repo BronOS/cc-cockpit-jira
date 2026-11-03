@@ -44,10 +44,15 @@ const bytes = (s) => Buffer.byteLength(s, 'utf8')
  * @param {string} [o.lane]
  * @param {Map<string, string>} [o.assets] attachment id -> asset id of the images downloaded
  * @param {string} [o.note] a line shown above the header (the cached copy's reason)
+ * @param {number} [o.maxBytes] the html budget in UTF-8 bytes (default and maximum HTML_MAX_BYTES; the
+ *   `jira` service passes a smaller one when another plugin embeds the issue in its own document)
  * @returns {{ html: string, inlined: Set<string>, omittedComments: number }}
  */
 function issueDocument(o) {
   const { issue, raw, site } = o
+  const maxBytes = Math.min(HTML_MAX_BYTES, Number.isFinite(o.maxBytes) && o.maxBytes > 0 ? o.maxBytes : HTML_MAX_BYTES)
+  // The description may take at most half of a smaller budget (the comments need room too).
+  const descMax = Math.min(DESCRIPTION_MAX_BYTES, Math.floor(maxBytes / 2))
   const assets = o.assets || new Map()
   const attachments = raw ? attachmentsOf(raw) : issue.attachments || []
   const inlined = new Set()
@@ -77,9 +82,11 @@ function issueDocument(o) {
   parts.push('<h2>Description</h2>')
   const descBody = raw && raw.fields ? raw.fields.description : issue.description
   let desc = render(descBody)
-  if (bytes(desc) > DESCRIPTION_MAX_BYTES) {
+  if (bytes(desc) > descMax) {
     const text = typeof descBody === 'string' ? descBody : adfToText(descBody)
-    desc = `<p><em>The description is too long to show formatted; its text follows.</em></p>\n${textToHtml(cut(text, 300000))}`
+    desc = `<p><em>The description is too long to show formatted; its text follows.</em></p>\n${textToHtml(cut(text, Math.min(300000, Math.floor(descMax / 3))))}`
+    // Escaping can still grow a text past a small budget: then only the note, the issue in Jira has it.
+    if (bytes(desc) > descMax) desc = '<p><em>The description is too long to show here; the issue in Jira has it.</em></p>'
   }
   parts.push(desc || '<p><em>No description.</em></p>')
 
@@ -94,7 +101,7 @@ function issueDocument(o) {
   // Attachments: rendered after the comments have marked what they inline, but measured first.
   const tail = () => attachmentsHtml(attachments, assets, inlined, site)
   const fixed = bytes(parts.join('\n')) + bytes(tail()) + 2000
-  let room = HTML_MAX_BYTES - fixed
+  let room = maxBytes - fixed
   const kept = []
   for (let i = comments.length - 1; i >= 0; i--) {
     const b = bytes(comments[i]) + 1

@@ -223,9 +223,29 @@ function fakeCtx(opts = {}) {
         })
       },
       available: (name) => Boolean(services[name]),
-      provide() {},
+      // What the host provides, called the way another plugin's handle would: arguments and results
+      // structured-cloned, `caller()` set to `as` for the call.
+      provide(name, impl) {
+        ctx.provided[name] = impl
+      },
       emit() {},
-      caller: () => undefined,
+      caller: () => ctx.callerId,
+    },
+    provided: {},
+    callerId: undefined,
+    async callService(name, method, args = [], as = 'bronos.gmail') {
+      const impl = ctx.provided[name]
+      if (!impl) throw new Error(`no enabled plugin in this project provides service "${name}"`)
+      if (typeof impl[method] !== 'function') throw new Error(`service "${name}" (plugin bronos.jira) has no method "${method}"`)
+      ctx.callerId = as
+      try {
+        const p = impl[method](...structuredClone(args))
+        ctx.callerId = undefined
+        return structuredClone(await p)
+      } catch (e) {
+        ctx.callerId = undefined
+        throw new Error(e && e.message ? e.message : String(e))
+      }
     },
     handles: {},
     lastState() {

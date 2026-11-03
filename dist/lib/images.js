@@ -167,9 +167,12 @@ async function prune(dir, maxFiles, maxBytes) {
  * @param {ReturnType<typeof imageCache>} o.cache
  * @param {number} [o.waitMs]
  * @param {AbortSignal} [o.signal] the host's stop
+ * @param {number} [o.totalChars] all dataUrls together at most this (default and maximum MAX_TOTAL_CHARS;
+ *   the `jira` service passes a smaller one when another plugin embeds the issue beside its own pictures)
  */
 async function gatherImages(o) {
   const waitMs = o.waitMs === undefined ? WAIT_MS : o.waitMs
+  const budget = Math.min(MAX_TOTAL_CHARS, o.totalChars === undefined ? MAX_TOTAL_CHARS : o.totalChars)
   const got = new Map() // attachment id -> Buffer
   const failed = []
   const todo = []
@@ -212,7 +215,7 @@ async function gatherImages(o) {
     const buf = got.get(a.id)
     if (!buf) continue
     const d = toDataUrl(buf)
-    if (!d || d.dataUrl.length > MAX_DATAURL_CHARS || total + d.dataUrl.length > MAX_TOTAL_CHARS) continue
+    if (!d || d.dataUrl.length > MAX_DATAURL_CHARS || total + d.dataUrl.length > budget) continue
     total += d.dataUrl.length
     const id = assetId(a.id)
     assets.push({ id, name: a.name, mime: d.mime, dataUrl: d.dataUrl })

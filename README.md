@@ -17,6 +17,9 @@ to discuss. It is **read-only towards Jira**: it never comments, transitions or 
   (description, comments, attachments with their images), where you select text to add notes and
   press Discuss (the Claude tab you are looking at) or New session.
 - `ccc jira ...` from any tab of the project.
+- **For other plugins** (0.5.0): the `jira` service tells them an issue's status and shows the issue
+  in their own views. The [Gmail plugin](https://github.com/BronOS/cc-cockpit-gmail) uses it for Jira
+  mail: hints for triage and the issue below the mail (see "The jira service").
 
 ## Requirements
 
@@ -71,6 +74,7 @@ Settings > This project > Jira, or from a tab: `ccc plugin config bronos.jira <k
 | `mentionProjects` | `[]` | project keys searched for mentions; empty: the projects of your assigned issues |
 | `pollMinutes` | 3 | only while the project's window is open |
 | `triageText` | `full` | `full` or `summary` (see Privacy) |
+| `mailSenders` | `[]` | addresses Jira's notification mails come from, for other plugins (Gmail); empty: `jira@<your site's host>` |
 
 ```sh
 ccc plugin config bronos.jira site=https://acme.atlassian.net email=me@acme.com
@@ -132,6 +136,26 @@ token), newest attachment first, within these limits:
 A bigger image, the 16th, or one that did not arrive in time is a link. Downloads that were still
 running finish into the cache, so the next open shows them. The page is at most 2 MB of HTML: when
 a very long thread does not fit, the oldest comments give way, with a line saying how many.
+
+## The jira service
+
+Since 0.5.0 the plugin provides the service `jira` (v1) to the other plugins of the project. A
+plugin declares `"services": { "uses": { "jira": 1 } }` and calls `ctx.services.use('jira')`; it
+needs nothing else (no token: the calls go through this plugin, which talks to Jira). Every method
+is async, takes and returns plain data, and rejects with `jira: <why>` (never a token).
+
+| Method | Answers |
+|---|---|
+| `site()` | `{ ready, site, senders, account }`: the configured site, the addresses its notification mails come from (`mailSenders`, else `jira@<site host>`), and your account `{ accountId, displayName }` once a poll knows it (else null). Not configured: `ready: false` and `error`. Never rejects. |
+| `issue(key, { maxAgeMs? })` | `{ key, summary, status, category, done, priority, type, assignee, mine, lane, url, updatedAt, source, at }`: `category` is Jira's status category (`new`, `indeterminate`, `done`), `mine` whether you are the assignee, `lane` the panel lane or null, `source` `poll` or `fetch`. From the last poll when it is at most `maxAgeMs` old (default 5 min, 15 s to 1 h), else from a cache of earlier answers, else one small read of the issue's header fields. |
+| `document(key, { maxHtmlBytes?, maxImages?, maxImageChars?, waitMs? })` | `{ key, title, url, html, aside, assets }`: the issue as the reviewer shows it (the HTML body, the details column, the pictures as reviewer assets), read fresh (the cached copy, with `stale`, when Jira cannot be reached). The options can only lower this plugin's own limits (2,000,000 bytes, 15 pictures, 7.5 MiB, 10 s), for a plugin that shows the issue beside its own content. It does not mark the issue read. |
+
+`key` must look like `ABC-123` (letters, digits and `_`, a dash, a number; at most 64 characters), so
+nothing else reaches a Jira URL. The service protects Jira from a busy caller: lookups that need Jira
+run at most 2 at a time and 30 a minute, documents 1 at a time and 6 a minute; a call past that is
+refused at once (`jira: busy ...`, `jira: too many ...`) and logged with the caller's id. An unknown
+key is not asked again for 5 minutes. No newer cc-cockpit is needed: plugin services are in every
+app version this plugin runs on (tested against 0.9.2).
 
 ## CLI
 

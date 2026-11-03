@@ -20,6 +20,9 @@ const MAX_HISTORIES = 500
 // labels .. parent: only for the details column of the issue view (lib/document.js issueDetails).
 const ISSUE_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,description,comment,project,attachment,labels,components,fixVersions,duedate,resolution,parent'
 
+// The search's header fields (jql.js SEARCH_FIELDS), for a single issue.
+const HEADER_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,project'
+
 /**
  * @param {object} o
  * @param {string} o.site the configured site origin (`https://x.atlassian.net`), already validated
@@ -171,6 +174,16 @@ function createClient(o) {
     return raw
   }
 
+  /**
+   * One issue's header fields only (the `jira` service's `issue(key)` when the poll has no fresh copy):
+   * no comments, no changelog, so one small request.
+   */
+  async function issueHeader(key, signal) {
+    const raw = await get(`/rest/api/3/issue/${encodeURIComponent(key)}`, { fields: HEADER_FIELDS }, `issue ${key}`, signal)
+    if (!raw || !raw.fields || typeof raw.key !== 'string') throw new JiraError(`issue ${key}: Jira sent no fields`, { kind: 'json' })
+    return { key: raw.key, fields: raw.fields }
+  }
+
   async function myself(signal) {
     const me = await get('/rest/api/3/myself', null, 'myself', signal)
     if (!me || typeof me.accountId !== 'string') throw new JiraError('Jira did not say who the token belongs to (myself)', { kind: 'json' })
@@ -205,6 +218,7 @@ function createClient(o) {
     get,
     search,
     issue,
+    issueHeader,
     myself,
     attachment,
     /** 'classic' | 'scoped' | null (not settled yet). */
@@ -225,4 +239,4 @@ function dedupe(list) {
   return out
 }
 
-module.exports = { createClient, ISSUE_FIELDS }
+module.exports = { createClient, ISSUE_FIELDS, HEADER_FIELDS }

@@ -63,6 +63,15 @@ function readSettings(p) {
     const n = Math.floor(Number(v))
     return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d
   }
+  // The addresses Jira's notification mails come from, for the `jira` service (a mail plugin tells a
+  // Jira mail by its sender). Empty: Jira Cloud's own sender for the site, `jira@<site host>`.
+  const mailSenders = []
+  for (const a of Array.isArray(s.mailSenders) ? s.mailSenders : []) {
+    const addr = typeof a === 'string' ? a.trim().toLowerCase() : ''
+    if (!addr) continue
+    if (addr.length > 254 || !/^[^\s@"'<>(),;:\\/[\]]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(addr)) problems.push(`mailSenders: "${String(a).slice(0, 60)}" is not an email address, skipped`)
+    else if (!mailSenders.includes(addr) && mailSenders.length < 10) mailSenders.push(addr)
+  }
   const tokenKind = s.tokenKind === 'classic' || s.tokenKind === 'scoped' ? s.tokenKind : 'auto'
   const triageText = s.triageText === 'summary' ? 'summary' : 'full'
   const cfg = {
@@ -78,11 +87,26 @@ function readSettings(p) {
     pollMinutes: int(s.pollMinutes, 3, 1, 1440),
     rowsPerLane: int(s.rowsPerLane, 10, 1, 300),
     triageText,
+    mailSenders,
   }
   // Ready = enough to talk to Jira. A bad optional value (a project key) is reported but does
   // not stop the plugin; a bad site or email does.
   const ready = !missing.length && !problems.some((x) => x.startsWith('site:') || x.startsWith('email:'))
   return { cfg, missing, problems, ready }
+}
+
+/**
+ * The senders of the site's notification mails: the setting, else Jira Cloud's default
+ * `jira@<site host>` (derived from the configured site, so nothing site-specific is in the code).
+ */
+function mailSendersOf(cfg) {
+  if (cfg.mailSenders && cfg.mailSenders.length) return [...cfg.mailSenders]
+  if (!cfg.site) return []
+  try {
+    return [`jira@${new URL(cfg.site).hostname.toLowerCase()}`]
+  } catch {
+    return []
+  }
 }
 
 /** What to tell the person when something is missing: one line per field, with where to set it. */
@@ -102,4 +126,4 @@ function connectionKey(cfg) {
   return hashOf([cfg.site, cfg.email, cfg.tokenKind, cfg.token])
 }
 
-module.exports = { readSettings, checkSite, missingText, connectionKey, LANE_DEFAULTS }
+module.exports = { readSettings, checkSite, missingText, connectionKey, mailSendersOf, LANE_DEFAULTS }

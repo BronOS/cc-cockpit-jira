@@ -3,7 +3,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { readSettings, checkSite, missingText } = require('../dist/lib/settings')
+const { readSettings, checkSite, missingText, mailSendersOf } = require('../dist/lib/settings')
 
 test('nothing set: site, email and token are missing, the plugin is not ready', () => {
   const r = readSettings({})
@@ -67,6 +67,16 @@ test('the manifest schema follows the app\'s rules: no regex, a top-level secret
   assert.ok(!('default' in token))
   assert.deepEqual(Object.keys(token).sort(), ['description', 'format', 'title', 'type'])
   for (const [k, p] of Object.entries(schema.properties)) if (p.oneOf) assert.ok('default' in p, `${k} has a default`)
-  assert.deepEqual(manifest.services, { uses: { triage: 1, reviewer: 1 } })
+  assert.deepEqual(manifest.services, { provides: { jira: 1 }, uses: { triage: 1, reviewer: 1 } })
   assert.ok(!manifest.contributes.cli[0].stdin, 'no stdin: it would apply to every subcommand')
+})
+
+test('mailSenders: the setting, else jira@<site host>; bad addresses are skipped with a problem', () => {
+  const base = { site: 'https://acme.atlassian.net', email: 'me@example.com', apiToken: 't' }
+  assert.deepEqual(mailSendersOf(readSettings(base).cfg), ['jira@acme.atlassian.net'])
+  const r = readSettings({ ...base, mailSenders: [' Jira@Example.COM ', 'not an address', 'jira@example.com', ''] })
+  assert.deepEqual(mailSendersOf(r.cfg), ['jira@example.com'])
+  assert.equal(r.ready, true, 'a bad sender does not stop the plugin')
+  assert.ok(r.problems.some((p) => p.startsWith('mailSenders:')))
+  assert.deepEqual(mailSendersOf(readSettings({}).cfg), [])
 })

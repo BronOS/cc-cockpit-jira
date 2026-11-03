@@ -8,9 +8,9 @@
 // poll searches, reads changed issues in full, updates the seen marks, asks triage about what
 // changed, and posts the state to the panel. Nothing is polled until site, email and token are set.
 
-const { readSettings, connectionKey, missingText } = require('./lib/settings')
+const { readSettings, connectionKey, missingText, mailSendersOf } = require('./lib/settings')
 const { createClient } = require('./lib/client')
-const { compact, attachmentsOf } = require('./lib/model')
+const { compact, attachmentsOf, header } = require('./lib/model')
 const { poll, buildView, allRows, loadCache } = require('./lib/poll')
 const { loadSeen, seed, markRead, markUnread, emptySeen } = require('./lib/seen')
 const { triageItem, mentionedBy } = require('./lib/triage')
@@ -19,9 +19,11 @@ const { pickTab, openerArgv, isMissingAnnotate } = require('./lib/actions')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
 const { hashOf, oneLine, cut, issueKey } = require('./lib/util')
-const { issueDocument } = require('./lib/document')
+const { issueDocument, HTML_MAX_BYTES } = require('./lib/document')
+const { statusLane } = require('./lib/lanes')
+const svc = require('./lib/service')
 const { headerSpec } = require('./lib/header')
-const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, WAIT_MS } = require('./lib/images')
+const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_CHARS, WAIT_MS } = require('./lib/images')
 const path = require('node:path')
 
 const PANEL = 'main'
@@ -285,6 +287,8 @@ function start(ctx, io = {}) {
       S.error = null
     }
     if (connectionKey(before) !== connectionKey(after)) S.client = null
+    // The service's answers belong to the old site or account (and the senders may have changed).
+    lookups.clear()
     if (S.settings.ready) reschedule()
     rebuild()
     postState()
@@ -426,9 +430,10 @@ function start(ctx, io = {}) {
    * from the cache or downloaded with the token, waited for at most WAIT_MS. With the cached copy
    * (Jira unreachable) only cached images are used.
    */
-  async function issueView({ issue, raw, lane, mark, stale }, note, withAside) {
+  async function issueView({ issue, raw, lane, mark, stale }, note, withAside, budget = {}) {
     const attachments = raw ? attachmentsOf(raw) : issue.attachments || []
-    const { wanted } = selectImages(attachments)
+    // `budget` (the jira service's document(): another plugin embeds the issue) can only lower the limits.
+    const { wanted } = budget.maxImages === 0 ? { wanted: [] } : selectImages(attachments, { ...(budget.maxImages ? { max: budget.maxImages } : {}), ...(budget.maxImageChars ? { totalChars: budget.maxImageChars } : {}) })
     let assets = []
     let byAttachment = new Map()
     if (wanted.length) {
@@ -436,15 +441,16 @@ function start(ctx, io = {}) {
         wanted,
         download: stale ? null : (a, signal) => client().attachment(a.id, { maxBytes: MAX_IMAGE_BYTES, signal: signal || abort.signal, timeoutMs: IMAGE_TIMEOUT_MS }),
         cache: imgCache(),
-        waitMs: io.imageWaitMs === undefined ? WAIT_MS : io.imageWaitMs,
+        waitMs: budget.waitMs !== undefined ? Math.min(budget.waitMs, io.imageWaitMs === undefined ? WAIT_MS : io.imageWaitMs) : io.imageWaitMs === undefined ? WAIT_MS : io.imageWaitMs,
         signal: abort.signal,
+        ...(budget.maxImageChars ? { totalChars: budget.maxImageChars } : {}),
       })
       assets = r.assets
       byAttachment = r.byAttachment
       for (const f of r.failed) ctx.log.warn(`image ${f.id} of ${issue.key}: ${f.message}`)
       if (r.late) ctx.log.info(`${issue.key}: ${r.late} image(s) not downloaded in time, shown as links (cached for the next open)`)
     }
-    const doc = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note, aside: Boolean(withAside) })
+    const doc = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note, aside: Boolean(withAside), ...(budget.maxHtmlBytes ? { maxBytes: budget.maxHtmlBytes } : {}) })
     return { html: doc.html, assets, aside: doc.aside }
   }
 
@@ -543,6 +549,139 @@ function start(ctx, io = {}) {
     delete S.sigs[key]
     await classifyChanged(new Set([key]))
     setNotice(had ? `${key}: your correction is gone.` : `${key} had no correction.`)
+  }
+
+
+  // ---- the jira service (v1; design "The jira service") ----
+  //
+  // Other plugins of this project (bronos.gmail: is this mail about a Done issue? the issue below the
+  // mail) ask through `ctx.services.use('jira')`. Answers come from the last poll when it is recent
+  // enough for the caller, else from a cache of earlier lookups, else from one small read of the
+  // issue's header fields; Jira is never asked faster than the limits in lib/service.js allow.
+
+  const lookups = svc.createTtlCache(svc.LOOKUP_CACHE) // `<site> <key>` -> { at, value } | { at, error }
+  const inflight = new Map() // the same key asked twice at once: one request
+  const lookupLimit = svc.createLimiter({ ...svc.LIMITS.lookup, now })
+  const documentLimit = svc.createLimiter({ ...svc.LIMITS.document, now })
+  const DOCUMENT_MAX = { html: HTML_MAX_BYTES, images: MAX_IMAGES, imageChars: MAX_TOTAL_CHARS, waitMs: WAIT_MS }
+
+  function caller() {
+    try {
+      return (typeof ctx.services.caller === 'function' && ctx.services.caller()) || 'a plugin'
+    } catch {
+      return 'a plugin'
+    }
+  }
+
+  function notConfigured() {
+    const what = [...S.settings.missing, ...S.settings.problems.filter((p) => p.startsWith('site:') || p.startsWith('email:')).map((p) => p.split(':')[0])]
+    return new Error(`jira: the Jira plugin is not configured in this project${what.length ? ` (${[...new Set(what)].join(', ')})` : ''}`)
+  }
+
+  /** The header of a key in the last poll's lists (assigned, Done, mention candidates), or null. */
+  function polledHeader(key) {
+    if (!S.lists) return null
+    for (const list of [S.lists.assigned, S.lists.done, S.lists.candidates]) {
+      const h = (list || []).find((x) => x.key === key)
+      if (h) return h
+    }
+    return null
+  }
+
+  function factsOf(h, source, at) {
+    const me = S.cache && S.cache.me ? S.cache.me.accountId : ''
+    const row = rowOf(h.key)
+    const mine = Boolean(me) && h.assigneeId === me
+    const lane = row ? row.lane : mine ? statusLane(h, cfg().onHold) : null
+    return svc.issueFacts(h, { me, browse: browseUrl(cfg().site, h.key), lane, source, at })
+  }
+
+  async function serviceSite() {
+    await ready
+    const c = cfg()
+    const me = S.cache && S.cache.me
+    return {
+      ready: S.settings.ready,
+      site: S.settings.ready ? c.site : '',
+      senders: S.settings.ready ? mailSendersOf(c) : [],
+      account: me ? { accountId: me.accountId, displayName: me.displayName || '' } : null,
+      ...(S.settings.ready ? {} : { error: notConfigured().message }),
+    }
+  }
+
+  async function serviceIssue(rawKey, opts, who) {
+    const key = svc.checkKey(rawKey)
+    const { maxAgeMs } = svc.issueOptions(opts)
+    await ready
+    if (!S.settings.ready) throw notConfigured()
+    const t = now()
+    // The last poll's search, when it is as fresh as the caller wants (and the account is known).
+    if (S.cache && S.cache.me && t - S.lastPoll <= maxAgeMs) {
+      const h = polledHeader(key)
+      if (h) return factsOf(h, 'poll', S.lastPoll)
+    }
+    const ck = `${cfg().site} ${key}`
+    const hit = lookups.get(ck)
+    if (hit && t - hit.at <= (hit.error ? Math.min(maxAgeMs, svc.NEGATIVE_MS) : maxAgeMs)) {
+      if (hit.error) throw new Error(hit.error)
+      return factsOf(hit.value, 'fetch', hit.at)
+    }
+    if (inflight.has(ck)) return inflight.get(ck)
+    const p = lookupLimit
+      .run(async () => {
+        if (!S.cache) await loadSiteState()
+        if (!S.cache.me) S.cache.me = await client().myself(abort.signal)
+        const raw = await client().issueHeader(key, abort.signal)
+        return header(raw.key, raw.fields)
+      })
+      .then(
+        (h) => {
+          const at = now()
+          lookups.set(ck, { at, value: h })
+          return factsOf(h, 'fetch', at)
+        },
+        (e) => {
+          const err = svc.serviceError(e)
+          // Jira's answer for this key (none, or not yours to see) is kept; a busy refusal or a network
+          // failure is not, so the next call tries again.
+          if (e && (e.kind === 'notfound' || e.kind === 'forbidden')) lookups.set(ck, { at: now(), error: err.message })
+          if (/^jira: (too many|busy)/.test(err.message)) ctx.log.warn(`jira service: refused a lookup of ${key} for ${who}: ${err.message}`)
+          throw err
+        },
+      )
+      .finally(() => inflight.delete(ck))
+    inflight.set(ck, p)
+    return p
+  }
+
+  async function serviceDocument(rawKey, opts, who) {
+    const key = svc.checkKey(rawKey)
+    const budget = svc.documentOptions(opts, DOCUMENT_MAX)
+    await ready
+    if (!S.settings.ready) throw notConfigured()
+    try {
+      return await documentLimit.run(async () => {
+        const got = await fullIssue(key)
+        const note = got.stale ? `Jira could not be reached, this is the copy from the last poll: ${got.stale}` : ''
+        // Not marked read: another plugin showing the issue is not the person opening it here.
+        const v = await issueView(got, note, true, budget)
+        const k = got.issue.key
+        return { key: k, title: `${k}: ${oneLine(got.issue.summary)}`, url: browseUrl(cfg().site, k), html: v.html, aside: v.aside || '', assets: v.assets, ...(got.stale ? { stale: got.stale } : {}) }
+      })
+    } catch (e) {
+      const err = svc.serviceError(e)
+      if (/^jira: (too many|busy)/.test(err.message)) ctx.log.warn(`jira service: refused the document of ${key} for ${who}: ${err.message}`)
+      throw err
+    }
+  }
+
+  if (typeof ctx.services.provide === 'function') {
+    ctx.services.provide('jira', {
+      site: () => serviceSite(),
+      // The caller is read before the first await (it names who a refusal in the log was for).
+      issue: (key, opts) => serviceIssue(key, opts, caller()),
+      document: (key, opts) => serviceDocument(key, opts, caller()),
+    })
   }
 
   // ---- panel ----
