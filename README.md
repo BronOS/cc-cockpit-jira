@@ -11,15 +11,21 @@ to discuss. It is **read-only towards Jira**: it never comments, transitions or 
 - **Triage**: each lane is sorted by priority (urgent, action, fyi, noise), then the newest
   activity. Simple cases are decided by the plugin's own hints (Done is noise, an unread High
   issue is urgent, ...); the rest is judged by Jev through jev-triage.
-- **Discuss with Claude**: Open shows the issue as readable text in the reviewer overlay, where you
-  select text to add notes and press Discuss (the Claude tab you are looking at) or New session.
+- **Discuss with Claude**: click a row and the issue opens in the reviewer overlay as a styled page
+  (description, comments, attachments with their images), where you select text to add notes and
+  press Discuss (the Claude tab you are looking at) or New session.
 - `ccc jira ...` from any tab of the project.
 
 ## Requirements
 
-- cc-cockpit with plugin API 1. **cc-cockpit 0.8.0 or later for annotations** (the bundled
-  reviewer's `annotate`). On an older app, Open shows a plain read-only page with Discuss, New
-  session and ↗ buttons, and the row buttons Discuss / New session work the same.
+- cc-cockpit with plugin API 1. **cc-cockpit 0.8.0 or later for notes on the styled issue** (the
+  bundled reviewer's `annotate` with its HTML mode). What opening an issue shows, by app:
+  - 0.8.0 with the HTML mode: the styled issue with its images, notes, Discuss, New session;
+  - a reviewer whose `annotate` takes text only (an early 0.8.0 build): the issue as plain text,
+    with notes; the plugin notices the refusal once and uses text for the rest of the run;
+  - 0.7.x (no `annotate`) or no reviewer enabled: the plugin's own read-only page with the same
+    styled issue and images, and Discuss, New session and ↗ buttons (no notes).
+  The row buttons Discuss / New session work the same everywhere.
 - **Jev triage (`bronos.jev-triage`) for sorting**, which in turn needs the Jev plugin
   (`bronos.jev`). Without it the lanes work unsorted and the panel says triage is off.
 - Jira Cloud (`https://<name>.atlassian.net`). Jira Server / Data Center is not supported.
@@ -83,10 +89,46 @@ Mentioned candidate and looks for a mention of you. An assigned issue where you 
 stays in its own lane, marked unread. Issues are read in full only when their `updated` changed
 (at most 120 a poll, 4 at a time; the rest come with the next polls).
 
-Row actions (click a row): **Open** (the reviewer overlay; marks it read), **Discuss** (sends the
-issue to the Claude tab you are looking at; with several tabs and no way to tell, you pick one),
-**New session**, **↗** (the issue in your browser), **Mark read / unread**, **Wrong?** (correct the
-triage priority; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel).
+**Click a row** (or press Enter on it) to open the issue (see below); opening marks it read. The
+other actions are small buttons that show while the pointer is over a row or the row has the
+keyboard focus: **↗** (the issue in your browser), **Read / Unread**, **Wrong?** (correct the triage
+priority; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel), **Discuss**
+(sends the issue to the Claude tab you are looking at; with several tabs and no way to tell, you
+pick one) and **New** (a new Claude session about it). Keyboard: Tab to a row, ↑ / ↓ (Home / End)
+move between rows, Enter or Space opens, Tab goes on to the row's buttons.
+
+## The issue view
+
+Opening an issue reads it fresh from Jira and shows it as a styled page:
+
+- a header card: key and summary, type, status, priority, assignee, reporter, created and updated;
+- the description, formatted as in Jira: headings, lists, tables, code blocks, quotes, panels
+  (info, note, warning, error, success), mentions, status lozenges, expand sections, links;
+- the comments oldest first, as cards; the ones others wrote since you last looked are marked new;
+- **Attachments**: name and size of each; an image is shown where the text shows it (or in the list
+  when the text does not), other files and images that are not shown are links to them in Jira
+  (your browser's Jira session opens them).
+
+The page is built by the plugin from Jira's document format, never from Jira's own HTML: every text
+is escaped, links keep only `http(s)` and `mailto` addresses, and no picture is loaded from the
+network by the page.
+
+Images are downloaded by the plugin with your token (only from your site or the Atlassian gateway;
+Jira hands the bytes over through its media host, which gets a signed address and never the
+token), newest attachment first, within these limits:
+
+| Limit | Value | Why |
+|---|---|---|
+| images per issue | 15 | the reviewer takes at most 30 assets; a thread of screenshots gets heavy |
+| one image | 700 KiB | its data URL stays under the reviewer's 1,000,000 characters |
+| all images | 7.5 MiB of data URLs | under the reviewer's 8 MiB |
+| types | PNG, JPEG, GIF, WebP | checked on the bytes, not the type Jira claims; SVG is a link |
+| waiting for downloads | 10 s an open | what is not there by then is a link this time |
+| cache | 300 images, 64 MiB | in the plugin's project data folder, least recently used go first |
+
+A bigger image, the 16th, or one that did not arrive in time is a link. Downloads that were still
+running finish into the cache, so the next open shows them. The page is at most 2 MB of HTML: when
+a very long thread does not fit, the oldest comments give way, with a line saying how many.
 
 ## CLI
 
@@ -108,8 +150,11 @@ ccc jira help
   only the key, summary, status, priority and type go, or turn jev-triage off for the project.
 - Discuss and New session put the issue text into a Claude Code session, which sends it to
   Anthropic like anything else you type there.
-- The plugin keeps a cache of the issues it shows (the plugin's project data folder) and its seen
-  marks (plugin storage), both bounded. The token stays in the OS keychain.
+- The plugin keeps a cache of the issues it shows and of the attachment images it downloaded (the
+  plugin's project data folder) and its seen marks (plugin storage), all bounded. The token stays
+  in the OS keychain.
+- The images of an opened issue go into the reviewer overlay (or the plugin's page) on your
+  machine; Discuss and New session send the issue text, not the images.
 
 ## Development
 

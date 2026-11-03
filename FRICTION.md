@@ -36,6 +36,10 @@ subcommand (`ccc jira` declares no stdin); no way to see a panel from a session;
   html panel or overlay page nothing says what a link does (the sandbox allows scripts only), and
   the host has no `openExternal`. Did: `ctx.exec(['xdg-open', url])` (`open` on macOS), the URL as
   one argument and https only; on Windows the panel shows the URL instead (`start` needs a shell).
+  (0.2.0) Same question for a link inside an html overlay page (the fallback reader shows Jira
+  links and attachment links): does a click navigate the overlay frame, go to the system browser,
+  or nothing? Did: the page catches every link click and posts `{ open: href }`; the host opens
+  http(s) with the same `ctx.exec` opener and shows anything else as text.
 
 - **`api`: which Claude tab the person is looking at.** Open (being added: `SessionInfo.active` in 0.8.0).
   Needed: Discuss sends to "the currently open Claude tab". Guide/types: `SessionInfo` has status,
@@ -85,3 +89,45 @@ subcommand (`ccc jira` declares no stdin); no way to see a panel from a session;
   is plain Node", which in Node means a 3xx response with its `Location` (not the browser's opaque
   redirect). Did: rely on that (plain Node 26 against a loopback server: 302 with its Location, as expected);
   the suites use a fake fetch, so it is unverified inside the app's Electron build.
+
+## Found building 0.2.0 (HTML issue view, row clicks), 2026-11-02
+
+Against the installed cc-cockpit 0.7.0 guide; the reviewer's HTML mode comes with 0.8.0 (being
+built), so its shape is from my brief, not from the guide.
+
+- **`api` / `plugins`: a consumer cannot tell whether `reviewer.annotate` has the HTML mode.** Open.
+  Needed: send `{ html, assets }` to a reviewer that takes it, `{ text }` to one whose annotate is
+  text-only (0.7 has none; early 0.8 builds take text only). Guide: no reviewer methods at all (the
+  entry above), no service minor version, and `available(name)` is per major. What a text-only
+  annotate does with an unknown `html` field (reject? ignore it and show nothing?) is not said,
+  nor the rejection text. Did: call with html; on any rejection but "has no method" retry with
+  text, and remember "html refused" for the run only when the text call worked (so an overlay
+  that failed for another reason does not switch modes). A reviewer that silently ignored `html`
+  and opened an empty overlay would not be noticed. Would help: a capability list or a minor
+  version on the service (`available('reviewer', 'annotate.html')`), or the guide naming the
+  error a provider throws for an unknown field.
+
+- **`api`: the reviewer's assets are given only at call time.** Open (brief: "if the reviewer API
+  only takes assets at call time").
+  Needed: open the issue at once and let images arrive as they download. Guide: nothing (no
+  reviewer docs); the brief's `annotate` has no handle and no way to add assets later. Did: wait at
+  most 10 s for the downloads, send what is there, make the rest links; the running downloads go
+  to a cache for the next open. Would help: `annotate` returning a handle with `addAssets`, or
+  `assets` accepting a pending marker the reviewer fills from a later call. Also unstated: the
+  characters an asset id may use (I use `att<digits>`), whether an asset no `<img>` references is
+  an error, and whether a note can anchor on an image (its alt text) or only on text.
+
+- **`panels`: keyboard focus in a panel frame.** Open.
+  Needed: rows the keyboard can reach (Tab to a row, arrows between rows, Enter opens, Tab on to
+  its buttons). Guide: says what the frame's CSP and sandbox allow, and that `--cc-focus` is the
+  focus-ring colour, but not how the keyboard gets into a panel (a shortcut to focus a panel? does
+  Tab from the terminal reach the frame?) nor which keys the app takes before the page sees them
+  (do arrow keys, Enter or Space in a focused panel ever reach a terminal or an app shortcut?).
+  Did: ordinary tab stops and key handlers inside the page, checked only in headless Chromium with
+  a stand-in SDK, not inside the app.
+
+- **`api`: no size guidance for `ctx.dataDir`.** Open (minor).
+  Needed: an image cache in the project data folder. Guide: the folder's path and that it is
+  created on first read; nothing on a quota, whether the app ever cleans it (plugin uninstalled,
+  project removed), or whether a big folder is a problem (backups, sync). Did: bound the cache
+  myself (300 files, 64 MiB, least recently used first).

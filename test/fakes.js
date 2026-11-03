@@ -8,6 +8,7 @@ const path = require('node:path')
 
 const SITE = 'https://acme.atlassian.net'
 const GATEWAY = 'https://api.atlassian.com'
+const MEDIA = 'https://api.media.atlassian.com'
 const EMAIL = 'me@example.com'
 const TOKEN = 'ATATT3xFfGF0-test-token'
 const ME = '5b10ac8d82e05b22cc7d4ef5'
@@ -19,7 +20,10 @@ const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(b
 /**
  * A fake Jira. `scoped: true` makes the site refuse the token (as it does a scoped one) and the
  * gateway take it. `issues` overrides issue bodies; `fail` maps a key to a status; `routes` lets
- * a test answer a URL itself first (return undefined to fall through).
+ * a test answer a URL itself first (return undefined to fall through). `attachments` maps an
+ * attachment id to its bytes: the content URL answers 303 to the media host with a signed address,
+ * as Jira Cloud does, and the media host serves the bytes only without the token (`mediaDelay`:
+ * ms before it answers).
  */
 function fakeJira(opts = {}) {
   const calls = []
@@ -34,6 +38,13 @@ function fakeJira(opts = {}) {
     }
     const u = new URL(url)
     if (u.origin === SITE && u.pathname === '/_edge/tenant_info') return json({ cloudId })
+    if (u.origin === MEDIA) {
+      const id = u.pathname.match(/^\/file\/f-(\d+)\/binary$/)
+      if (opts.mediaDelay) await new Promise((r) => setTimeout(r, opts.mediaDelay))
+      if (headers.Authorization) return json({ error: 'a media URL takes its signed token alone' }, 400)
+      if (!id || u.searchParams.get('token') !== 'signed' || !opts.attachments || !opts.attachments[id[1]]) return json({ error: 'nope' }, 404)
+      return new Response(opts.attachments[id[1]], { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+    }
     let rest
     if (u.origin === SITE) {
       if (opts.scoped || headers.Authorization !== expected) return json(fixture('error-401.json'), 401)
@@ -45,6 +56,11 @@ function fakeJira(opts = {}) {
       throw new Error(`fake jira: unexpected host ${u.origin}`)
     }
     if (rest === '/rest/api/3/myself') return json(fixture('myself.json'))
+    const att = rest.match(/^\/rest\/api\/3\/attachment\/content\/(\d+)$/)
+    if (att) {
+      if (!opts.attachments || !opts.attachments[att[1]]) return json({ errorMessages: ['no such attachment'] }, 404)
+      return new Response(null, { status: 303, headers: { location: `${MEDIA}/file/f-${att[1]}/binary?token=signed&client=c1` } })
+    }
     if (rest === '/rest/api/3/search/jql') {
       const jql = u.searchParams.get('jql')
       if (jql.includes('statusCategory != Done')) {
@@ -149,9 +165,23 @@ function fakeCtx(opts = {}) {
     },
     overlay: {
       start(spec) {
-        const o = { spec, posts: [], answer: opts.overlayAnswer || { kind: 'dismissed' } }
+        const o = { spec, posts: [], listeners: [], answer: opts.overlayAnswer || { kind: 'dismissed' } }
         ctx.overlays.push(o)
-        return { result: Promise.resolve(o.answer), post: (m) => o.posts.push(m), onMessage: () => () => {}, close() {}, focus() {} }
+        // `opts.overlayWait`: the result waits for the test (o.close(answer)), so it can talk to the page first.
+        let close
+        const result = opts.overlayWait ? new Promise((r) => (close = r)) : Promise.resolve(o.answer)
+        o.close = (answer) => close && close(answer || { kind: 'dismissed' })
+        o.send = (m) => o.listeners.forEach((fn) => fn(structuredClone(m)))
+        return {
+          result,
+          post: (m) => {
+            if (JSON.stringify(m).length > 1040384) throw new Error('overlay message over 1,040,384 chars of JSON')
+            o.posts.push(structuredClone(m))
+          },
+          onMessage: (fn) => (o.listeners.push(fn), () => {}),
+          close() {},
+          focus() {},
+        }
       },
     },
     sessions: {
@@ -233,4 +263,15 @@ function fakeTriage() {
   return t
 }
 
-module.exports = { fakeJira, fakeCtx, fakeTriage, fixture, tmpDir, SITE, GATEWAY, EMAIL, TOKEN, ME, NOW, CONFIGURED }
+/** Bytes that sniff as a picture of the type (the magic number, then filler up to `size`). */
+function picture(type = 'png', size = 64) {
+  const head = {
+    png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+    gif: Buffer.from('GIF89a', 'latin1'),
+    webp: Buffer.concat([Buffer.from('RIFF', 'latin1'), Buffer.alloc(4), Buffer.from('WEBP', 'latin1')]),
+  }[type]
+  return Buffer.concat([head, Buffer.alloc(Math.max(0, size - head.length), 7)])
+}
+
+module.exports = { fakeJira, fakeCtx, fakeTriage, fixture, tmpDir, picture, SITE, GATEWAY, MEDIA, EMAIL, TOKEN, ME, NOW, CONFIGURED }

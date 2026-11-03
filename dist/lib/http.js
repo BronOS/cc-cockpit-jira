@@ -31,7 +31,8 @@ class JiraError extends Error {
    * @param {string} message what the person reads
    * @param {{ kind: string, status?: number, retryAfter?: number }} info kind: auth (401),
    *   forbidden (403), notfound (404), rate (429), http (another status), network, timeout,
-   *   unsafe (a URL the token may not go to), json (a body that is not JSON)
+   *   unsafe (a URL the token may not go to), json (a body that is not JSON), toolarge (a body
+   *   over the caller's byte limit)
    */
   constructor(message, info) {
     super(message)
@@ -56,6 +57,8 @@ function basicAuth(email, token) {
  * @param {Set<string>} o.trusted origins the token may go to (the site, the gateway)
  * @param {typeof fetch} o.fetch injected (tests pass a fake; nothing here reaches the network itself)
  * @param {AbortSignal} [o.signal] the caller's cancel (a `ccc` Ctrl+C, deactivate)
+ * @param {string} [o.accept] the Accept header (default JSON; an attachment takes any type)
+ * @param {number} [o.timeoutMs] per hop, and the body read after the last hop (default 20 s)
  * @returns {Promise<Response>} the final response (any status; the caller reads it)
  */
 async function guardedGet(url, o) {
@@ -68,7 +71,7 @@ async function guardedGet(url, o) {
   }
   let withAuth = true
   for (let hop = 0; ; hop++) {
-    const headers = { Accept: 'application/json' }
+    const headers = { Accept: o.accept || 'application/json' }
     if (withAuth) headers.Authorization = o.auth
     let res
     const timeout = AbortSignal.timeout(o.timeoutMs || TIMEOUT_MS)
@@ -96,6 +99,39 @@ async function guardedGet(url, o) {
     if (nextOrigin !== httpsOrigin(current)) withAuth = false
     current = next
   }
+}
+
+/**
+ * A response body as a Buffer, refused past `max` bytes (a declared Content-Length over it is
+ * refused before reading; a body that keeps coming is cut off at the limit and cancelled). The
+ * fetch's signal (guardedGet's timeout) still bounds the time.
+ */
+async function readLimited(res, max, what) {
+  const tooLarge = () => new JiraError(`${what} is over ${max} bytes`, { kind: 'toolarge', status: res.status })
+  const declared = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > max) {
+    if (res.body) await res.body.cancel().catch(() => {})
+    throw tooLarge()
+  }
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.length > max) throw tooLarge()
+    return buf
+  }
+  const reader = res.body.getReader()
+  const chunks = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > max) {
+      await reader.cancel().catch(() => {})
+      throw tooLarge()
+    }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength))
+  }
+  return Buffer.concat(chunks, total)
 }
 
 /** `https://host` of a URL for a message (never its path or query: those may carry ids). */
@@ -160,4 +196,4 @@ function jiraMessage(text) {
   return ''
 }
 
-module.exports = { GATEWAY, JiraError, authError, basicAuth, guardedGet, readJson, httpsOrigin, safeHost }
+module.exports = { GATEWAY, JiraError, authError, basicAuth, guardedGet, readJson, readLimited, httpsOrigin, safeHost }

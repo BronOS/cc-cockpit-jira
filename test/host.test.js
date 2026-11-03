@@ -4,12 +4,12 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const host = require('../dist/host')
-const { fakeJira, fakeCtx, fakeTriage, SITE, NOW, CONFIGURED } = require('./fakes')
+const { fakeJira, fakeCtx, fakeTriage, fixture, picture, SITE, MEDIA, NOW, CONFIGURED } = require('./fakes')
 
 function boot(opts = {}) {
   const jira = fakeJira(opts.jira)
-  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer, sessions: opts.sessions, overlayAnswer: opts.overlayAnswer })
-  const h = host._start(ctx, { fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000 })
+  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer, sessions: opts.sessions, overlayAnswer: opts.overlayAnswer, overlayWait: opts.overlayWait })
+  const h = host._start(ctx, { fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs })
   return { jira, ctx, h, triage: ctx.services && opts.triage === undefined ? null : opts.triage }
 }
 const lane = (st, id) => st.lanes.find((l) => l.id === id)
@@ -118,55 +118,150 @@ test('Wrong? stores an override and the row shows it; Undo clears it', async () 
   await h.stop()
 })
 
-test('Open with reviewer.annotate (0.8.0): the issue text, its URL and key, the active tab; it marks read', async () => {
+/** ABC-1 with two attachments: an image the newest comment shows, and a log file. */
+function abc1WithAttachments() {
+  const raw = fixture('issue-ABC-1.json')
+  raw.fields.attachment = [
+    { id: '10001', filename: 'shot.png', mimeType: 'image/png', size: 300, created: '2026-11-01T10:14:00.000+0100', author: { displayName: 'Ann Smith' } },
+    { id: '10002', filename: 'trace.log', mimeType: 'text/plain', size: 900, created: '2026-11-01T10:13:00.000+0100', author: { displayName: 'Ann Smith' } },
+  ]
+  raw.fields.comment.comments[1].body.content.push({ type: 'mediaSingle', content: [{ type: 'media', attrs: { id: 'uuid', type: 'file', alt: 'shot.png' } }] })
+  return raw
+}
+const attJira = (extra = {}) => ({ issues: { 'ABC-1': abc1WithAttachments() }, attachments: { 10001: picture('png', 300) }, ...extra })
+
+test('Open with the html reviewer (0.8.0): styled HTML, the image as an asset, the active tab; it marks read', async () => {
   const calls = []
   const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
-  const { ctx, h } = boot({ reviewer, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })] })
+  const { ctx, h, jira } = boot({ reviewer, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })], jira: attJira() })
   await h.pollNow('test')
   await ctx.runCli(['unread', 'ABC-1'])
   assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, true)
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].title, 'ABC-1: Checkout fails for EU cards')
-  assert.equal(calls[0].url, `${SITE}/browse/ABC-1`)
-  assert.equal(calls[0].key, 'jira:ABC-1')
-  assert.equal(calls[0].tabId, 't2')
-  assert.match(calls[0].text, /\[new\] Ann Smith/)
+  const c = calls[0]
+  assert.equal(c.title, 'ABC-1: Checkout fails for EU cards')
+  assert.equal(c.url, `${SITE}/browse/ABC-1`)
+  assert.equal(c.key, 'jira:ABC-1')
+  assert.equal(c.tabId, 't2')
+  assert.equal(c.text, undefined, 'html mode sends no text')
+  assert.match(c.html, /^<div class="card"><h1>ABC-1: Checkout fails for EU cards<\/h1>/)
+  assert.match(c.html, /<div class="card new"><div class="card-header"><strong>Ann Smith<\/strong>/)
+  assert.match(c.html, /<img data-asset="att10001" alt="shot.png"/)
+  assert.match(c.html, new RegExp(`<a href="${SITE}/rest/api/3/attachment/content/10002">trace\\.log</a>`))
+  assert.deepEqual(c.assets.map((a) => [a.id, a.name, a.mime]), [['att10001', 'shot.png', 'image/png']])
+  assert.match(c.assets[0].dataUrl, /^data:image\/png;base64,iVBORw0KGgo/)
+  // The media host got the signed address without the token.
+  const media = jira.calls.filter((x) => x.url.startsWith(MEDIA))
+  assert.equal(media.length, 1)
+  assert.equal(media[0].auth, undefined)
   assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, false)
   assert.equal(ctx.overlays.length, 0)
-  assert.equal(ctx.lastState().annotate, true)
+  // The second open takes the image from the cache: no new download.
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(jira.calls.filter((x) => x.url.startsWith(MEDIA)).length, 1)
+  assert.equal(calls[1].assets.length, 1)
+  assert.match((await ctx.runCli(['status'])).stdout, /HTML with its images/)
   await h.stop()
 })
 
-test('Open on an app without annotate: our own reader, and its New session button opens a tab', async () => {
-  const reviewer = { review: async () => {} } // the 0.7.0 reviewer: no annotate
-  const { ctx, h } = boot({ reviewer, overlayAnswer: { kind: 'value', value: { action: 'newSession' } } })
+test('a slow image does not hold the open: after the wait it is a link, and the open goes on', async () => {
+  const calls = []
+  const reviewer = { annotate: async (spec) => (calls.push(spec), {}) }
+  const { ctx, h } = boot({ reviewer, jira: attJira({ mediaDelay: 400 }), imageWaitMs: 30 })
+  await h.pollNow('test')
+  const t0 = Date.now()
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.ok(Date.now() - t0 < 350, 'the open did not wait for the image')
+  assert.equal(calls[0].assets, undefined)
+  assert.match(calls[0].html, new RegExp(`<a href="${SITE}/rest/api/3/attachment/content/10001">shot\\.png</a>`))
+  await h.stop()
+})
+
+test('a reviewer whose annotate takes text only: html refused, then text; remembered for the run', async () => {
+  const calls = []
+  const reviewer = {
+    annotate: async (spec) => {
+      calls.push(spec)
+      if (typeof spec.text !== 'string') throw new Error('annotate: text must be a string')
+      return {}
+    },
+  }
+  const { ctx, h } = boot({ reviewer, jira: attJira() })
+  await h.pollNow('test')
+  await ctx.runCli(['unread', 'ABC-1'])
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(calls.length, 2)
+  assert.ok(calls[0].html)
+  assert.match(calls[1].text, /^ABC-1: Checkout fails for EU cards/)
+  assert.match(calls[1].text, /\[new\] Ann Smith/)
+  assert.equal(calls[1].html, undefined)
+  assert.equal(calls[1].key, 'jira:ABC-1')
+  assert.equal(ctx.lastState().notice, null)
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(calls.length, 3, 'the next open goes straight to text')
+  assert.equal(typeof calls[2].text, 'string')
+  assert.match((await ctx.runCli(['status'])).stdout, /text only/)
+  await h.stop()
+})
+
+test('a real annotate failure (html and text both refused) is shown, and html is tried again next time', async () => {
+  let n = 0
+  const reviewer = { annotate: async () => { n++; throw new Error('annotate: the overlay could not open') } }
+  const { ctx, h } = boot({ reviewer })
   await h.pollNow('test')
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(ctx.overlays.length, 1)
-  assert.equal(ctx.overlays[0].spec.file, 'panels/issue.html')
-  assert.match(ctx.overlays[0].posts[0].text, /^ABC-1: Checkout fails for EU cards/)
+  assert.equal(n, 2)
+  assert.equal(ctx.overlays.length, 0)
+  assert.match(ctx.lastState().notice.text, /could not open/)
+  assert.equal(h.S.htmlRejected, null)
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(n, 4)
+  await h.stop()
+})
+
+test('Open on an app without annotate: our own page gets the same HTML and the image; a link opens in the browser', async () => {
+  const reviewer = { review: async () => {} } // the 0.7.0 reviewer: no annotate
+  const { ctx, h } = boot({ reviewer, jira: attJira(), overlayWait: true })
+  await h.pollNow('test')
+  const opening = ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  for (let i = 0; i < 50 && !ctx.overlays.length; i++) await new Promise((r) => setTimeout(r, 5))
+  const o = ctx.overlays[0]
+  assert.equal(o.spec.file, 'panels/issue.html')
+  const head = o.posts[0]
+  assert.equal(head.type, 'doc')
+  assert.equal(head.key, 'ABC-1')
+  const html = o.posts.filter((m) => m.type === 'html').map((m) => m.part).join('')
+  assert.equal(o.posts.filter((m) => m.type === 'html').length, head.parts)
+  assert.match(html, /<img data-asset="att10001"/)
+  const asset = o.posts.find((m) => m.type === 'asset')
+  assert.equal(asset.id, 'att10001')
+  assert.match(asset.dataUrl, /^data:image\/png;base64,/)
+  // A link in the page: http(s) goes to xdg-open as one argument, anything else is not opened.
+  o.send({ open: 'https://grafana.example.com/d/x' })
+  o.send({ open: 'file:///etc/passwd' })
+  await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(ctx.execs.map((e) => e.argv), [['xdg-open', 'https://grafana.example.com/d/x']])
+  assert.match(ctx.lastState().notice.text, /Only web links/)
+  o.close({ kind: 'value', value: { action: 'newSession' } })
+  await opening
   assert.equal(ctx.opened.length, 1)
   assert.match(ctx.opened[0].prompt, /^About Jira ABC-1: Checkout fails for EU cards\n/)
   assert.equal(ctx.lastState().annotate, false)
   await h.stop()
 })
 
-test('Open with no reviewer at all also uses the reader', async () => {
-  const { ctx, h } = boot({ reviewer: null })
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'open', key: 'ABC-2' })
-  assert.equal(ctx.overlays.length, 1)
-  await h.stop()
-})
-
-test('a real annotate failure is shown, not hidden behind the reader', async () => {
-  const reviewer = { annotate: async () => { throw new Error('annotate: text over the limit') } }
-  const { ctx, h } = boot({ reviewer })
+test('Open with no reviewer at all also uses the page; a big issue arrives in parts under the message limit', async () => {
+  const raw = fixture('issue-ABC-1.json')
+  raw.fields.comment.comments.push({ id: '300', author: { displayName: 'Ann Smith', accountId: 'a' }, created: '2026-11-01T11:00:00.000+0100', body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: '"quoted" \\ '.repeat(50000) }] }] } })
+  const { ctx, h } = boot({ reviewer: null, jira: { issues: { 'ABC-1': raw } } })
   await h.pollNow('test')
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(ctx.overlays.length, 0)
-  assert.match(ctx.lastState().notice.text, /text over the limit/)
+  const o = ctx.overlays[0]
+  const parts = o.posts.filter((m) => m.type === 'html')
+  assert.ok(parts.length >= 3, `${parts.length} parts`)
+  for (const m of o.posts) assert.ok(JSON.stringify(m).length <= 1040384)
+  assert.match(parts.map((m) => m.part).join(''), /&quot;quoted&quot;/)
   await h.stop()
 })
 

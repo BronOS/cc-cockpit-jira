@@ -33,13 +33,14 @@ function tabLabel(s) {
 }
 
 /**
- * The argv that opens an https URL in the system browser: `open` on macOS, `xdg-open` elsewhere.
- * The URL travels as one argument (never through a shell) and must be https, so it cannot start
- * with `-` and be read as an option. Null where there is no such opener (Windows: `start` is a
- * cmd.exe built-in and would need a shell).
+ * The argv that opens an http(s) URL in the system browser: `open` on macOS, `xdg-open`
+ * elsewhere. The URL travels as one argument (never through a shell) and must start with
+ * `https://` (or `http://`, a link in an issue), so it cannot start with `-` and be read as an
+ * option, nor be a `file:` or app scheme. Null where there is no such opener (Windows: `start` is
+ * a cmd.exe built-in and would need a shell).
  */
 function openerArgv(platform, url) {
-  if (!/^https:\/\//.test(url)) return null
+  if (typeof url !== 'string' || !/^https?:\/\/[^\s]+$/.test(url)) return null
   if (platform === 'darwin') return ['open', url]
   if (platform === 'win32') return null
   return ['xdg-open', url]

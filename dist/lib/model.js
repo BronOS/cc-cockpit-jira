@@ -1,7 +1,8 @@
 'use strict'
 // What the plugin keeps of an issue: its header fields from a search, and from a full read its
 // description and activity (comments and the field changes that count, oldest first), with the
-// mentions of the person found in the ADF bodies.
+// mentions of the person found in the ADF bodies, and the attachments' metadata (the reader's
+// images and links; their bytes are fetched only when the issue is opened).
 
 const { adfToText, mentionIds } = require('./adf')
 const { parseTime, cut } = require('./util')
@@ -110,8 +111,36 @@ function compact(raw, me, size = 'cache') {
     ...h,
     description: cut(adfToText(f.description), lim.description),
     events: events.slice(-lim.events),
+    attachments: attachmentsOf(raw),
     full: true,
   }
+}
+
+const MAX_ATTACHMENTS = 100
+
+/**
+ * The issue's attachments (the `attachment` field) as kept: `{ id, name, mime, size, created, by }`,
+ * newest first, at most 100. The id goes into a URL path and a file name, so only digits pass;
+ * `size` is null when Jira did not say.
+ */
+function attachmentsOf(raw) {
+  const list = raw && raw.fields && Array.isArray(raw.fields.attachment) ? raw.fields.attachment : []
+  const out = []
+  for (const a of list) {
+    if (!a || typeof a !== 'object') continue
+    const id = String(a.id == null ? '' : a.id)
+    if (!/^[0-9]{1,20}$/.test(id)) continue
+    out.push({
+      id,
+      name: cut(typeof a.filename === 'string' && a.filename.trim() ? a.filename.trim() : `attachment ${id}`, 200),
+      mime: typeof a.mimeType === 'string' ? a.mimeType.toLowerCase().split(';')[0].trim() : '',
+      size: Number.isFinite(a.size) && a.size >= 0 ? a.size : null,
+      created: parseTime(a.created),
+      by: (a.author && typeof a.author.displayName === 'string' && a.author.displayName) || '',
+    })
+  }
+  out.sort((x, y) => y.created - x.created || Number(y.id) - Number(x.id))
+  return out.slice(0, MAX_ATTACHMENTS)
 }
 
 function changeLine(items) {
@@ -124,4 +153,4 @@ function newestActivity(issue) {
   return Math.max(ev, issue.closedAt || 0, issue.updatedAt || 0, issue.created || 0)
 }
 
-module.exports = { header, compact, newestActivity, CHANGE_FIELDS }
+module.exports = { header, compact, attachmentsOf, newestActivity, CHANGE_FIELDS }

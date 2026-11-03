@@ -7,6 +7,7 @@
       logic lives in main.js. The SDK gives the page `ccPanel` and the app theme variables. Every
       action is a button: a panel cannot submit a <form> (sandboxed without allow-forms). -->
     <script src="/__sdk/panel.js"></script>
+    <script src="rowlogic.js" defer></script>
     <script src="main.js" defer></script>
     <style>
       body { margin: 0; padding: 10px; font: 12px/1.4 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
@@ -27,8 +28,11 @@
       .lane-head .count { color: var(--cc-fg-muted); font-weight: normal; }
       .lane-head .chev { width: 10px; color: var(--cc-fg-subtle); }
       ul { list-style: none; margin: 0; padding: 0; }
-      li.row { border-bottom: 1px solid var(--cc-border); padding: 4px 2px; }
-      .line { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+      li.row { position: relative; border-bottom: 1px solid var(--cc-border); padding: 4px 2px; cursor: pointer; border-radius: 3px; }
+      li.row:hover { background: var(--cc-surface-1); }
+      li.row:focus { outline: none; }
+      li.row:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: -2px; }
+      .line { display: flex; gap: 6px; align-items: center; }
       .key { font-family: ui-monospace, monospace; color: var(--cc-fg-muted); white-space: nowrap; }
       .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .unread .summary { font-weight: 600; }
@@ -43,8 +47,11 @@
       .p-action { color: var(--cc-status-needs-permission); }
       .p-fyi { color: var(--cc-status-working); }
       .p-noise { color: var(--cc-fg-subtle); }
-      .actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px 14px; }
-      .actions button { font-size: 11px; }
+      /* The hover buttons: always in the DOM (so Tab reaches them), faded out until the row is
+         hovered or has the focus inside it; over the right end of the row's second line. */
+      .actions { position: absolute; right: 2px; bottom: 2px; display: flex; gap: 3px; padding: 1px 2px; background: var(--cc-surface-2); border-radius: 4px; box-shadow: 0 1px 3px var(--cc-shadow); opacity: 0; pointer-events: none; transition: opacity 80ms; }
+      li.row:hover .actions, li.row:focus-within .actions { opacity: 1; pointer-events: auto; }
+      .actions button { font-size: 10px; line-height: 15px; padding: 0 5px; }
       .wrong { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 2px 0 2px 14px; padding: 4px 6px; background: var(--cc-surface-2); border-radius: 4px; }
       .empty { color: var(--cc-fg-muted); padding: 6px 2px; }
       code { font-family: ui-monospace, monospace; background: var(--cc-surface-2); padding: 0 3px; border-radius: 3px; }

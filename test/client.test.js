@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { createClient } = require('../dist/lib/client')
-const { fakeJira, SITE, GATEWAY, EMAIL, TOKEN, fixture } = require('./fakes')
+const { fakeJira, picture, SITE, GATEWAY, MEDIA, EMAIL, TOKEN, fixture } = require('./fakes')
 
 const make = (jira, tokenKind) => createClient({ site: SITE, email: EMAIL, token: TOKEN, tokenKind, fetch: jira.fetch })
 
@@ -102,4 +102,48 @@ test('issue pages comments and the changelog past the first page', async () => {
   const first = new URL(jira.calls.find((x) => x.url.includes('/issue/ABC-1?')).url)
   assert.equal(first.searchParams.get('expand'), 'changelog')
   assert.match(first.searchParams.get('fields'), /description/)
+})
+
+test('attachment: the site redirects to the media host, which gets the signed address without the token', async () => {
+  const bytes = picture('png', 500)
+  const jira = fakeJira({ attachments: { 10001: bytes } })
+  const c = make(jira)
+  const got = await c.attachment('10001', { maxBytes: 1000 })
+  assert.deepEqual(got, bytes)
+  const [first, second] = jira.calls.filter((x) => x.url.includes('attachment') || x.url.startsWith(MEDIA))
+  assert.equal(first.url, `${SITE}/rest/api/3/attachment/content/10001`)
+  assert.ok(first.auth, 'the site gets the token')
+  assert.equal(first.redirect, 'manual')
+  assert.ok(second.url.startsWith(`${MEDIA}/file/f-10001/binary?token=signed`))
+  assert.equal(second.auth, undefined, 'the media host never sees the token')
+})
+
+test('attachment: a scoped token downloads through the gateway, still without the token at the media host', async () => {
+  const jira = fakeJira({ scoped: true, attachments: { 7: picture('jpeg', 100) } })
+  const c = make(jira, 'scoped')
+  await c.attachment('7', { maxBytes: 1000 })
+  const urls = jira.calls.map((x) => [x.url.split('?')[0], Boolean(x.auth)])
+  assert.deepEqual(urls.slice(-2), [
+    [`${GATEWAY}/ex/jira/9f1c2d3e-4b5a-6789-abcd-ef0123456789/rest/api/3/attachment/content/7`, true],
+    [`${MEDIA}/file/f-7/binary`, false],
+  ])
+})
+
+test('attachment: over the byte limit, a redirect to plain http, a bad id, a 404', async () => {
+  const jira = fakeJira({ attachments: { 1: picture('png', 2000) } })
+  const c = make(jira)
+  await assert.rejects(c.attachment('1', { maxBytes: 1000 }), (e) => e.kind === 'toolarge')
+  await assert.rejects(c.attachment('../../myself', { maxBytes: 1000 }), (e) => e.kind === 'unsafe')
+  await assert.rejects(c.attachment('99', { maxBytes: 1000 }), (e) => e.kind === 'notfound')
+  const http = fakeJira({
+    routes: (url) => (url.includes('/attachment/content/') ? new Response(null, { status: 302, headers: { location: 'http://media.example/x' } }) : undefined),
+  })
+  const c2 = make(http)
+  await assert.rejects(c2.attachment('1', { maxBytes: 1000 }), (e) => e.kind === 'unsafe')
+  assert.ok(!http.calls.some((x) => x.url.startsWith('http://')), 'the http hop is never made')
+  // A declared Content-Length over the limit is refused before the body is read.
+  const declared = fakeJira({
+    routes: (url) => (url.includes('/attachment/content/') ? new Response(picture('png', 50), { status: 200, headers: { 'content-length': '999999' } }) : undefined),
+  })
+  await assert.rejects(make(declared).attachment('1', { maxBytes: 1000 }), /over 1000 bytes/)
 })

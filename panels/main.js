@@ -1,11 +1,13 @@
 'use strict'
 // The Jira panel: lanes of issues as the host sends them (`{ type: 'state', ... }`), actions
 // posted back as `{ type, key }`. The page keeps no data of its own (an opaque origin has no
-// storage) except which row is expanded. Every text from Jira goes in through textContent, never
-// as markup: an issue summary is untrusted.
+// storage) except which row's Wrong? chooser is open. Every text from Jira goes in through
+// textContent, never as markup: an issue summary is untrusted.
+//
+// A click on a row (or Enter on a focused row) opens the issue; the other actions are small
+// buttons shown on hover or focus (rowlogic.js, loaded before this file, decides which).
 
 let state = null
-let expanded = null // the key whose actions are shown
 let wrongOpen = null // the key whose Wrong? chooser is shown
 
 const $ = (id) => document.getElementById(id)
@@ -81,16 +83,33 @@ function dot(verdict) {
 
 function rowActions(r) {
   const a = el('div', { class: 'actions' })
-  a.append(button('Open', () => post('open', { key: r.key }), state.annotate ? 'Read it with notes, then Discuss or New session (marks it read)' : 'Read it (marks it read)', 'primary'))
-  a.append(button('Discuss', () => post('discuss', { key: r.key }), 'Send the issue to the Claude tab you are looking at'))
-  a.append(button('New session', () => post('newSession', { key: r.key }), 'Open a new Claude tab about this issue'))
-  a.append(button('↗', () => post('browser', { key: r.key }), 'Open in the browser'))
-  if (r.unread) a.append(button('Mark read', () => post('read', { key: r.key })))
-  else if (r.canUnread) a.append(button('Mark unread', () => post('unread', { key: r.key })))
-  if (state.triage.on && r.lane !== 'done') {
-    a.append(button('Wrong?', () => { wrongOpen = wrongOpen === r.key ? null : r.key; render() }, 'Correct the triage priority'))
+  for (const b of rowButtons(r, { triageOn: state.triage.on })) {
+    const onclick = b.action === 'wrong' ? () => { wrongOpen = wrongOpen === r.key ? null : r.key; render() } : () => post(b.action, { key: r.key })
+    const n = button(b.label, onclick, b.title)
+    n.dataset.action = b.action
+    n.setAttribute('aria-label', `${b.title}: ${r.key}`)
+    a.append(n)
   }
   return a
+}
+
+function openRow(key) {
+  post('open', { key })
+}
+
+/** The rows in page order (for the arrow keys). */
+function rowEls() {
+  return [...document.querySelectorAll('li.row')]
+}
+
+function onRowKey(ev, r, li) {
+  const act = rowKeyAction(ev.key, ev.target === li, { alt: ev.altKey, ctrl: ev.ctrlKey, meta: ev.metaKey })
+  if (!act) return
+  ev.preventDefault()
+  if (act === 'open') return openRow(r.key)
+  const rows = rowEls()
+  const to = moveIndex(act, rows.indexOf(li), rows.length)
+  if (to !== null) rows[to].focus()
 }
 
 function wrongBox(r) {
@@ -105,8 +124,20 @@ function wrongBox(r) {
 }
 
 function renderRow(r) {
-  const li = el('li', { class: `row${r.unread ? ' unread' : ''}` })
-  const line = el('div', { class: 'line', title: r.summary, onclick: () => { expanded = expanded === r.key ? null : r.key; wrongOpen = null; render() } })
+  const li = el('li', {
+    class: `row${r.unread ? ' unread' : ''}`,
+    tabindex: '0',
+    'aria-label': `${r.key}: ${r.summary}${r.unread ? ' (unread)' : ''}. Enter opens it.`,
+    title: `${r.summary}\nClick to open${state.annotate ? ' (notes, Discuss, New session)' : ''}`,
+  })
+  li.dataset.key = r.key
+  li.addEventListener('click', (ev) => {
+    const inControl = Boolean(ev.target.closest && ev.target.closest('button, .wrong'))
+    const sel = window.getSelection && window.getSelection()
+    if (rowClickOpens(inControl, Boolean(sel && !sel.isCollapsed && li.contains(sel.anchorNode)))) openRow(r.key)
+  })
+  li.addEventListener('keydown', (ev) => onRowKey(ev, r, li))
+  const line = el('div', { class: 'line' })
   line.append(dot(r.verdict), el('span', { class: 'key', text: r.key }), el('span', { class: 'summary', text: r.summary }))
   if (r.unread) line.append(el('span', { class: 'new', text: r.newCount > 1 ? `${r.newCount} new` : 'new', title: 'Unread: activity of others since you last looked' }))
   li.append(line)
@@ -115,10 +146,8 @@ function renderRow(r) {
   if (r.priority) sub.append(el('span', { text: r.priority }))
   if (r.who) sub.append(el('span', { class: 'who', text: r.who }))
   li.append(sub)
-  if (expanded === r.key) {
-    li.append(rowActions(r))
-    if (wrongOpen === r.key) li.append(wrongBox(r))
-  }
+  li.append(rowActions(r))
+  if (wrongOpen === r.key) li.append(wrongBox(r))
   return li
 }
 
@@ -148,14 +177,36 @@ function renderLanes() {
   if (!state.lanes.length) box.append(el('p', { class: 'empty', text: 'Every lane is off (the lanes setting).' }))
 }
 
+/**
+ * Where the keyboard focus is, as `{ key, action }`, so a redraw (every state message replaces the
+ * rows) can put it back: without this every poll would throw a keyboard user out of the list.
+ */
+function focusSpot() {
+  const a = document.activeElement
+  if (!a || a === document.body) return null
+  const row = a.closest && a.closest('li.row')
+  if (!row) return null
+  return { key: row.dataset.key, action: a === row ? null : a.dataset.action || null }
+}
+
+function restoreFocus(spot) {
+  if (!spot) return
+  const row = rowEls().find((x) => x.dataset.key === spot.key)
+  if (!row) return
+  const target = spot.action ? row.querySelector(`button[data-action="${spot.action}"]`) : null
+  ;(target || row).focus({ preventScroll: true })
+}
+
 function render() {
   if (!state) return
+  const spot = focusSpot()
   const who = state.account ? ` · ${state.account}` : ''
   $('meta').textContent = state.ready ? `${state.polling ? 'polling… · ' : ''}${ago(state.lastPoll)}${who}` : ''
   $('meta').title = state.site || ''
   $('refresh').disabled = !state.ready || state.polling
   renderNotices()
   renderLanes()
+  restoreFocus(spot)
 }
 
 ccPanel.onMessage((m) => {

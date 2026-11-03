@@ -10,7 +10,7 @@
 
 const { readSettings, connectionKey, missingText } = require('./lib/settings')
 const { createClient } = require('./lib/client')
-const { compact } = require('./lib/model')
+const { compact, attachmentsOf } = require('./lib/model')
 const { poll, buildView, allRows, loadCache } = require('./lib/poll')
 const { loadSeen, seed, markRead, markUnread, emptySeen } = require('./lib/seen')
 const { triageItem, mentionedBy } = require('./lib/triage')
@@ -19,12 +19,19 @@ const { pickTab, openerArgv, isMissingAnnotate } = require('./lib/actions')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
 const { hashOf, oneLine, cut, issueKey } = require('./lib/util')
+const { issueDocument } = require('./lib/document')
+const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, WAIT_MS } = require('./lib/images')
+const path = require('node:path')
 
 const PANEL = 'main'
 const SOURCE = 'jira' // the triage source name: verdicts, overrides and cases group by it
 const TRIAGE_CHUNK = 500 // triage.classify takes at most 500 items a call
 const ROWS_PER_LANE = 300 // the panel message stays far below the 1 MiB post limit
 const CLI_WAIT_MS = 25000 // `ccc` gives a handler 30 s
+const IMAGE_TIMEOUT_MS = 20000 // one attachment download, redirects and body included
+// The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON
+// (`ccc guide panels`), and JSON can double a string (quotes, backslashes).
+const PAGE_HTML_PART = 400000
 
 let instance = null
 
@@ -59,6 +66,7 @@ function start(ctx, io = {}) {
     triageError: null,
     classifying: Promise.resolve(),
     annotateMissing: false, // set when a call proved the reviewer has no annotate
+    htmlRejected: null, // the reviewer's message when annotate took text but refused html (0.7/early 0.8)
     ui: { collapsed: {} },
     notice: null, // { text, kind: 'info'|'error' } after an action, until dismissed or replaced
     choose: null, // { key, tabs } when Discuss needs the person to pick a tab
@@ -109,6 +117,13 @@ function start(ctx, io = {}) {
       S.connKey = key
     }
     return S.client
+  }
+
+  let images = null
+  /** The image cache of the configured site (attachment ids are per site). */
+  function imgCache() {
+    if (!images || images.site !== cfg().site) images = { site: cfg().site, cache: imageCache(path.join(ctx.dataDir, 'images'), cfg().site) }
+    return images.cache
   }
 
   // ---- the view ----
@@ -292,13 +307,14 @@ function start(ctx, io = {}) {
     try {
       if (!S.cache) await loadSiteState()
       if (!S.cache.me) S.cache.me = await client().myself(signal)
-      const issue = compact(await client().issue(key, signal || abort.signal), S.cache.me.accountId, 'full')
-      return { issue, lane, mark }
+      const raw = await client().issue(key, signal || abort.signal)
+      const issue = compact(raw, S.cache.me.accountId, 'full')
+      return { issue, raw, lane, mark }
     } catch (e) {
       const cached = S.cache && S.cache.issues[key]
       if (cached) {
         ctx.log.warn(`reading ${key} fresh failed, using the cached copy: ${e.message}`)
-        return { issue: row ? row.issue : cached, lane, mark, stale: e.message }
+        return { issue: row ? row.issue : cached, raw: null, lane, mark, stale: e.message }
       }
       throw e
     }
@@ -324,12 +340,24 @@ function start(ctx, io = {}) {
     postState()
   }
 
+  /**
+   * Open: the issue as styled HTML with its images in the reviewer (cc-cockpit 0.8.0), else as
+   * plain text in the reviewer (a reviewer whose annotate takes text only), else in our own page.
+   * The chain, each step taken once a call proved the one before is not there:
+   *   annotate({ html, assets }) -> rejected (not "no method") -> annotate({ text })
+   *   -> "no method annotate" (0.7.0) or no reviewer -> panels/issue.html with the same HTML.
+   * A refusal of html is remembered for the run only when the text call then worked, so a
+   * failure that has nothing to do with html (the overlay could not open) does not switch modes.
+   */
   async function openIssue(key) {
-    const { issue, lane, mark, stale } = await fullIssue(key)
+    const got = await fullIssue(key)
+    const { issue, lane, mark, stale } = got
     const site = cfg().site
-    const text = readableText(issue, { site, mark, lane }) + (stale ? `\n\n(Jira could not be reached, this is the copy from the last poll: ${stale})` : '')
+    const staleNote = stale ? `Jira could not be reached, this is the copy from the last poll: ${stale}` : ''
+    const text = readableText(issue, { site, mark, lane }) + (stale ? `\n\n(${staleNote})` : '')
     const url = browseUrl(site, key)
-    // Opening marks it read (design); the text above already has its [new] marks.
+    const title = `${key}: ${oneLine(issue.summary)}`
+    // Opening marks it read (design); the text and the HTML already have their new marks.
     if (S.seen && issue.full) {
       markRead(S.seen, issue, now())
       await saveSeen()
@@ -337,28 +365,87 @@ function start(ctx, io = {}) {
       postState()
       void classifyChanged()
     }
+    let doc = null
+    const view = async () => (doc = doc || (await issueView(got, staleNote)))
     if (annotateOn()) {
-      const sessions = await ctx.sessions.list().catch(() => [])
-      const pick = pickTab(sessions)
-      try {
-        await reviewer.annotate({ title: `${key}: ${oneLine(issue.summary)}`, text, url, key: `jira:${key}`, ...(pick.tabId ? { tabId: pick.tabId } : {}) })
-        return
-      } catch (e) {
-        if (!isMissingAnnotate(e)) {
-          setNotice(`The reviewer could not open ${key}: ${e.message}`, 'error')
+      const pick = pickTab(await ctx.sessions.list().catch(() => []))
+      const base = { title, url, key: `jira:${key}`, ...(pick.tabId ? { tabId: pick.tabId } : {}) }
+      let htmlError = null
+      if (!S.htmlRejected) {
+        const v = await view()
+        try {
+          await reviewer.annotate({ ...base, html: v.html, ...(v.assets.length ? { assets: v.assets } : {}) })
           return
+        } catch (e) {
+          if (isMissingAnnotate(e)) {
+            noAnnotate()
+          } else {
+            htmlError = e && e.message ? e.message : String(e)
+            ctx.log.info(`reviewer refused the html of ${key} (${htmlError}); trying text`)
+          }
         }
-        // cc-cockpit before 0.8.0: no annotate. Remember it for this run and use our own page.
-        S.annotateMissing = true
-        ctx.log.info('reviewer has no annotate (cc-cockpit before 0.8.0): using the plain reader')
-        postState()
+      }
+      if (!S.annotateMissing) {
+        try {
+          await reviewer.annotate({ ...base, text })
+          if (htmlError) {
+            S.htmlRejected = htmlError
+            ctx.log.info('reviewer.annotate takes text only (cc-cockpit before 0.8.0 html mode): using text for this run')
+            postState()
+          }
+          return
+        } catch (e) {
+          if (!isMissingAnnotate(e)) {
+            setNotice(`The reviewer could not open ${key}: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
+            return
+          }
+          noAnnotate()
+        }
       }
     }
-    await plainReader(issue, text, url)
+    await plainReader(issue, await view(), url)
   }
 
-  /** Without annotations: our own read-only page with Discuss, New session and ↗. */
-  async function plainReader(issue, text, url) {
+  // cc-cockpit before 0.8.0: no annotate. Remember it for this run and use our own page.
+  function noAnnotate() {
+    S.annotateMissing = true
+    ctx.log.info('reviewer has no annotate (cc-cockpit before 0.8.0): using the plugin\'s reader page')
+    postState()
+  }
+
+  /**
+   * The issue as HTML plus the image assets: the image attachments chosen by images.selectImages,
+   * from the cache or downloaded with the token, waited for at most WAIT_MS. With the cached copy
+   * (Jira unreachable) only cached images are used.
+   */
+  async function issueView({ issue, raw, lane, mark, stale }, note) {
+    const attachments = raw ? attachmentsOf(raw) : issue.attachments || []
+    const { wanted } = selectImages(attachments)
+    let assets = []
+    let byAttachment = new Map()
+    if (wanted.length) {
+      const r = await gatherImages({
+        wanted,
+        download: stale ? null : (a, signal) => client().attachment(a.id, { maxBytes: MAX_IMAGE_BYTES, signal: signal || abort.signal, timeoutMs: IMAGE_TIMEOUT_MS }),
+        cache: imgCache(),
+        waitMs: io.imageWaitMs === undefined ? WAIT_MS : io.imageWaitMs,
+        signal: abort.signal,
+      })
+      assets = r.assets
+      byAttachment = r.byAttachment
+      for (const f of r.failed) ctx.log.warn(`image ${f.id} of ${issue.key}: ${f.message}`)
+      if (r.late) ctx.log.info(`${issue.key}: ${r.late} image(s) not downloaded in time, shown as links (cached for the next open)`)
+    }
+    const { html } = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note })
+    return { html, assets }
+  }
+
+  /**
+   * Without the reviewer's annotate: our own read-only page with Discuss, New session and ↗. It
+   * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
+   * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
+   */
+  async function plainReader(issue, view, url) {
     let handle
     try {
       handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: `${issue.key}: ${cut(oneLine(issue.summary), 80)}`, size: 'large' })
@@ -366,7 +453,18 @@ function start(ctx, io = {}) {
       setNotice(`Cannot open the reader: ${e.message}`, 'error')
       return
     }
-    handle.post({ key: issue.key, summary: issue.summary, text, url })
+    const parts = []
+    for (let i = 0; i < view.html.length; i += PAGE_HTML_PART) parts.push(view.html.slice(i, i + PAGE_HTML_PART))
+    try {
+      handle.post({ type: 'doc', key: issue.key, summary: issue.summary, url, parts: parts.length, assets: view.assets.length })
+      parts.forEach((part, i) => handle.post({ type: 'html', i, part }))
+      for (const a of view.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
+    } catch (e) {
+      ctx.log.warn(`posting ${issue.key} to the reader: ${e.message}`)
+    }
+    handle.onMessage((m) => {
+      if (m && typeof m.open === 'string') void openUrl(m.open).catch((e) => setNotice(e.message, 'error'))
+    })
     const res = await handle.result.catch((e) => {
       setNotice(`The reader failed: ${e.message}`, 'error')
       return null
@@ -402,7 +500,12 @@ function start(ctx, io = {}) {
   }
 
   async function openBrowser(key) {
-    const url = browseUrl(cfg().site, key)
+    return openUrl(browseUrl(cfg().site, key))
+  }
+
+  /** An http(s) address in the system browser (the ↗ button, a link in the reader page). */
+  async function openUrl(url) {
+    if (!/^https?:\/\//i.test(url)) return setNotice(`Only web links open from here; the address: ${cut(url, 300)}`)
     const argv = openerArgv(platform, url)
     if (!argv) return setNotice(`Open ${url} in your browser (no opener on this system).`)
     const r = await ctx.exec(argv, { timeoutMs: 15000 })
@@ -549,7 +652,11 @@ function start(ctx, io = {}) {
       pollMinutes: c.pollMinutes,
       counts: S.lists ? S.view.lanes.map((l) => ({ title: l.title, total: l.rows.length, unread: l.id === 'done' ? 0 : l.rows.filter((r) => r.unread).length })) : null,
       triage: triageOn() ? (S.triageError ? `error: ${S.triageError}` : 'on (bronos.jev-triage)') : 'off: install and enable Jev triage (bronos.jev-triage) to sort the lanes',
-      annotate: annotateOn() ? 'reviewer.annotate (notes on the issue text)' : 'plain reader (reviewer.annotate needs cc-cockpit 0.8.0)',
+      annotate: annotateOn()
+        ? S.htmlRejected
+          ? `reviewer.annotate, text only (its html mode needs cc-cockpit 0.8.0: ${S.htmlRejected})`
+          : 'reviewer.annotate (the issue as HTML with its images, notes on it)'
+        : 'the plugin\'s reader page (reviewer.annotate needs cc-cockpit 0.8.0)',
       deferred: S.stats ? S.stats.deferred : 0,
       error: S.error,
       laneErrors: S.laneErrors,
@@ -595,7 +702,7 @@ function start(ctx, io = {}) {
       abort.abort()
       ;(io.clearTimeout || clearTimeout)(firstPoll)
       if (stopSchedule) stopSchedule()
-      return cacheFile.flush().catch(() => {})
+      return Promise.all([cacheFile.flush().catch(() => {}), images ? images.cache.flush() : null])
     },
   }
 }

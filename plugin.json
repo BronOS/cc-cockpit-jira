@@ -1,7 +1,7 @@
 {
   "id": "bronos.jira",
   "name": "Jira",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api": 1,
   "main": "dist/host.js",
   "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Read-only towards Jira.",

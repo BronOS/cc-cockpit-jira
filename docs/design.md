@@ -1,7 +1,9 @@
 # Jira (bronos.jira)
 
-Status: design agreed with the user on 2026-11-02. External plugin (own repo, for the
-marketplace). The first source plugin for jev-triage. Read-only towards Jira.
+Status: design agreed with the user on 2026-11-02; 0.2.0 (same day, after trying 0.1.0): rows
+open on click with hover buttons, and the opened issue is styled HTML with attachments (section
+"The issue view"). External plugin (own repo, for the marketplace). The first source plugin for
+jev-triage. Read-only towards Jira.
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
@@ -86,25 +88,76 @@ it is, so only what happens next is new. Stored per project, bounded.
 
 Lanes as collapsible sections (only the enabled ones), each row: key, summary, status, a triage
 dot (priority colour, hollow below 0.5 confidence), unread mark, assignee or "mentioned by X".
-Row actions: Open (the overlay), Discuss, New session, ↗ (open in the browser via the app's
-link handling or ctx.exec of xdg-open/open), Mark read / unread, Wrong? (jev-triage's
-`triage.override` plus its case: or simply point to the triage panel). A header with the last
-poll time, a refresh button, and errors (auth, network) as a notice.
+A click on a row opens the issue (the overlay); so does Enter or Space on a focused row (each row
+is one tab stop; ↑ / ↓ / Home / End move between rows). The other actions are small buttons shown
+while the row is hovered or has the focus inside it (in the DOM all the time, only faded out, so
+Tab reaches them): ↗ (open in the browser via ctx.exec of xdg-open/open), Read / Unread, Wrong?
+(jev-triage's `triage.override`; the note for its eval goes through the triage panel), Discuss,
+New (session). The pure decisions (which buttons, which key does what) are in
+`panels/rowlogic.js`, which node:test loads too. A redraw (every state message) puts the keyboard
+focus back on the same row or button. A header with the last poll time, a refresh button, and
+errors (auth, network) as a notice.
 
 ## Discuss with Claude (the reviewer overlay)
 
-- Open: `ctx.services.use('reviewer').annotate({ title: '<KEY>: <summary>', text, url, key:
-  'jira:<KEY>' })` where `text` is the issue as readable plain text: header fields, description
-  (ADF -> plain text with lists, code blocks, links, mentions as @Name), then comments oldest
-  first with author and date, the new ones marked `[new]`. The person selects text to add notes,
-  writes a global comment, and presses Discuss (the currently open Claude tab by default) or New
-  session. Opening marks the issue read. (annotate is added to the bundled reviewer in cc-cockpit
-  0.8.0; check `ctx.services.available('reviewer')` and fall back below when missing or when the
-  call rejects with an unknown-method error.)
+- Open: `ctx.services.use('reviewer').annotate({ title: '<KEY>: <summary>', html, assets, url,
+  key: 'jira:<KEY>', tabId })`: the issue as HTML with its images (section "The issue view").
+  The person selects text to add notes (they anchor on the quoted text), writes a global comment,
+  and presses Discuss (the currently open Claude tab by default) or New session. Opening marks the
+  issue read. annotate and its HTML mode come with the bundled reviewer in cc-cockpit 0.8.0, so
+  the call falls back, once per step and remembered for the run:
+  1. `annotate({ html, assets })` rejects with anything but "has no method": a reviewer whose
+     annotate takes text only (early 0.8.0 builds). Retry as `annotate({ text })` with the readable
+     plain text (header fields, description, comments and changes oldest first, the new ones
+     marked `[new]`). Only when that works is "html refused" remembered; when it fails too the
+     person sees the error and the next open tries html again.
+  2. `service "reviewer" (plugin P) has no method "annotate"` (0.7.x), or no reviewer at all
+     (`ctx.services.available('reviewer')` false): the plugin's own overlay page
+     (`panels/issue.html`, below).
 - Discuss / New session row buttons without annotations: `ctx.sessions.send(activeTabId, text)`
   (the tab with `SessionInfo.active`, else ask: the only live tab, else show an error) and
   `ctx.sessions.open({ prompt })`, with a prompt that starts `About Jira <KEY>: <summary>` (never
   `/`, `!`, `#`, `&`) and carries the same issue text, capped.
+
+## The issue view (0.2.0)
+
+- Built from the ADF of a fresh read (`lib/adfhtml.js`, `lib/document.js`), never from Jira's
+  rendered HTML, and safe by construction: every text and attribute value escaped; only the
+  reviewer's allow-list tags and classes are written (header card `div.card` with `h1` and
+  `div.meta`, comments as `div.card` with `div.card-header` and `.new`, `ul.attachment-list`,
+  panels `div.jira-panel.jira-panel-<info|note|warning|error|success>`, `span.mention`,
+  `span.status.lozenge`); no style attribute (colours in the ADF are dropped); links only http(s)
+  and mailto (relative ones resolved against the site); headings shifted one level (the issue is
+  the h1); `media` external is a link, never a remote image.
+- Media to attachments: an ADF media node names a media-services file (a uuid, not the REST
+  attachment id) and its file name (`attrs.alt`): matched to the issue's `attachment` field by
+  name, the newest of a name winning. A downloaded image is `<img data-asset="att<id>">`; one not
+  downloaded is a link to `<site>/rest/api/3/attachment/content/<id>`; no match is `[attachment:
+  name]`.
+- Attachments section, newest first: name, size, author; an image shown in the text says so, a
+  downloaded image the text does not show is a figure in the list, the rest are links.
+- Images (`lib/images.js`): raster types only (png, jpeg, gif, webp, checked by magic number on
+  the bytes), newest first, at most 15, each at most 700 KiB raw (716,800 bytes: a dataUrl of at
+  most 955,759 chars, under the reviewer's 1,000,000), all dataUrls at most 7.5 MiB (under 8 MiB);
+  an attachment without a size is budgeted at the maximum. Downloads 3 at a time, the open waits at
+  most 10 s for them; none starts after that, the running ones finish into the cache (20 s each at
+  most) for the next open. With the cached copy (Jira unreachable) only cached images show.
+- Download: `client.attachment(id)` builds the URL from the id (digits only) on the client's own
+  base (site, or the gateway for a scoped token), never from a `content` link in a response; Jira
+  answers 303 to its media host with a signed address, which `guardedGet` follows without the
+  token (the rule of jirasite.py's `download`; stricter: once dropped the token never comes back on
+  that chain), https only, at most 3 redirects, the body read with a byte limit.
+- Cache: `<dataDir>/images/<site hash>-<id>.img` (0600, the folder 0700), at most 300 files and
+  64 MiB, least recently used first.
+- Size: at most 2,000,000 bytes of HTML (the reviewer's cap is 2 MiB); a description over 1 MB of
+  markup becomes its plain text; comments that do not fit give way oldest first, with a line.
+- The fallback page (`panels/issue.html`) gets the same HTML in parts of 400,000 chars (a page
+  message is at most 1,040,384 chars of JSON) and one message per image, keeps only the builder's
+  tags and attributes again (second line of defence), sets an image's src only to a
+  `data:image/(png|jpeg|gif|webp);base64,` URL, and posts a link click as `{ open }`, which the
+  host opens with xdg-open/open when it is http(s).
+- `ccc jira show`, Discuss, New session and triage keep the plain text (`readableText`,
+  `triageText`).
 
 ## CLI
 
@@ -114,4 +167,6 @@ poll time, a refresh button, and errors (auth, network) as a notice.
 
 ## Left out of v1
 
-Writing to Jira (comments, transitions), attachments and images, Jira Server/DC (PAT), OAuth.
+Writing to Jira (comments, transitions), Jira Server/DC (PAT), OAuth. Since 0.2.0 attachments
+are shown (images inline, the rest as links) but not scaled down: a picture over 700 KiB is a
+link.

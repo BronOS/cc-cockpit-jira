@@ -80,3 +80,19 @@ test('long comments are cut in the cache size, kept in the full size', () => {
   assert.ok(compact(raw, ME).events[0].text.length <= 3000)
   assert.equal(compact(raw, ME, 'full').events[0].text.length, 10000)
 })
+
+test('attachments: metadata only, newest first, ids digits only, the type without parameters', () => {
+  const raw = fixture('issue-ABC-1.json')
+  raw.fields.attachment = [
+    { id: '1', filename: 'old.png', mimeType: 'image/png', size: 10, created: '2026-10-01T10:00:00.000+0100', author: { displayName: 'Ann' }, content: 'https://evil.example/x' },
+    { id: 2, filename: ' new.txt ', mimeType: 'Text/Plain; charset=utf-8', created: '2026-10-02T10:00:00.000+0100' },
+    { id: '../3', filename: 'bad', mimeType: 'image/png' },
+    null,
+  ]
+  const i = compact(raw, ME, 'full')
+  assert.deepEqual(i.attachments, [
+    { id: '2', name: 'new.txt', mime: 'text/plain', size: null, created: Date.parse('2026-10-02T09:00:00Z'), by: '' },
+    { id: '1', name: 'old.png', mime: 'image/png', size: 10, created: Date.parse('2026-10-01T09:00:00Z'), by: 'Ann' },
+  ])
+  assert.deepEqual(compact(fixture('issue-ABC-2.json'), ME).attachments, [])
+})

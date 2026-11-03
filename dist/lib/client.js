@@ -11,13 +11,13 @@
 // gateway once. The kind that worked is kept for the client's life (in memory only: nothing
 // derived from the token is stored).
 
-const { GATEWAY, JiraError, authError, basicAuth, guardedGet, readJson, httpsOrigin } = require('./http')
+const { GATEWAY, JiraError, authError, basicAuth, guardedGet, readJson, readLimited, httpsOrigin } = require('./http')
 
 const SEARCH_PAGE = 100
 const COMMENT_PAGE = 100
 const MAX_COMMENTS = 500
 const MAX_HISTORIES = 500
-const ISSUE_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,description,comment,project'
+const ISSUE_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,description,comment,project,attachment'
 
 /**
  * @param {object} o
@@ -69,13 +69,13 @@ function createClient(o) {
     return m === 'scoped' ? `${GATEWAY}/ex/jira/${cloudId}` : site
   }
 
-  async function getOnce(m, path, params, signal) {
+  async function getOnce(m, path, params, signal, extra = {}) {
     const qs = params ? new URLSearchParams(params).toString() : ''
     const url = baseFor(m) + path + (qs ? `?${qs}` : '')
     // Only the origin of this request's base: a scoped client never sends to the site, a classic
     // one never to the gateway.
     const trusted = new Set([httpsOrigin(baseFor(m))])
-    return guardedGet(url, { auth, trusted, fetch: fetchFn, signal })
+    return guardedGet(url, { auth, trusted, fetch: fetchFn, signal, ...extra })
   }
 
   /** GET a REST path (`/rest/api/3/myself`) as JSON. */
@@ -176,11 +176,36 @@ function createClient(o) {
     return { accountId: me.accountId, displayName: typeof me.displayName === 'string' ? me.displayName : '' }
   }
 
+  /**
+   * An attachment's bytes (the reader's images), at most `maxBytes`. The address is built from
+   * the attachment id on the client's own base (site or gateway), never taken from the `content`
+   * link of a response, so nothing Jira sends can point the token elsewhere. The site answers with
+   * a redirect to its media host, which guardedGet follows without the token.
+   *
+   * @param {string} id the attachment id (digits)
+   * @param {{ maxBytes: number, signal?: AbortSignal, timeoutMs?: number }} o
+   * @returns {Promise<Buffer>}
+   */
+  async function attachment(id, o) {
+    const sid = String(id)
+    if (!/^[0-9]{1,20}$/.test(sid)) throw new JiraError('an attachment id is digits only', { kind: 'unsafe' })
+    // The token kind is settled by the first API call (an Open has read the issue just before).
+    if (mode === null) await myself(o.signal)
+    const res = await getOnce(mode, `/rest/api/3/attachment/content/${sid}`, null, o.signal, { accept: '*/*', ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}) })
+    if (res.status !== 200) {
+      // readJson turns a 4xx/5xx into the usual message; another 2xx (204) is no picture either.
+      await readJson(res, `attachment ${sid}`)
+      throw new JiraError(`attachment ${sid}: Jira answered ${res.status}`, { kind: 'http', status: res.status })
+    }
+    return readLimited(res, o.maxBytes, `attachment ${sid}`)
+  }
+
   return {
     get,
     search,
     issue,
     myself,
+    attachment,
     /** 'classic' | 'scoped' | null (not settled yet). */
     mode: () => mode,
   }
