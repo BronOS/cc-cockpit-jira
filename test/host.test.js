@@ -364,11 +364,32 @@ test('a site change starts over: no marks, verdicts or lanes of the old site', a
   await h.stop()
 })
 
+test('Issues per lane: only that many rows are sent until Show all, which is remembered', async () => {
+  const { ctx, h } = boot()
+  await ctx.changeSettings({ ...CONFIGURED, rowsPerLane: 1 })
+  await h.pollNow('test')
+  // The lane with the most issues in the fixtures (it needs at least two).
+  const id = ctx.lastState().lanes.reduce((a, b) => (b.total > a.total ? b : a)).id
+  const before = lane(ctx.lastState(), id)
+  assert.ok(before.total > 1, 'the fixtures need a lane with two issues')
+  assert.equal(before.limit, 1)
+  assert.equal(before.expanded, false)
+  assert.equal(before.rows.length, 1)
+  await ctx.sendPanel({ type: 'expand', lane: id })
+  const after = lane(ctx.lastState(), id)
+  assert.equal(after.expanded, true)
+  assert.equal(after.rows.length, after.total)
+  assert.deepEqual((await ctx.storage.get('ui')).expanded, { [id]: true })
+  await ctx.sendPanel({ type: 'expand', lane: id })
+  assert.equal(lane(ctx.lastState(), id).rows.length, 1)
+  await h.stop()
+})
+
 test('the panel toggle remembers a collapsed lane', async () => {
   const { ctx, h } = boot()
   await h.pollNow('test')
   await ctx.sendPanel({ type: 'toggle', lane: 'backlog' })
   assert.equal(lane(ctx.lastState(), 'backlog').collapsed, true)
-  assert.deepEqual(await ctx.storage.get('ui'), { collapsed: { backlog: true } })
+  assert.deepEqual(await ctx.storage.get('ui'), { collapsed: { backlog: true }, expanded: {} })
   await h.stop()
 })

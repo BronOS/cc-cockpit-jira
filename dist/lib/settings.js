@@ -76,6 +76,7 @@ function readSettings(p) {
     mentionDays: int(s.mentionDays, 7, 1, 90),
     mentionProjects,
     pollMinutes: int(s.pollMinutes, 3, 1, 1440),
+    rowsPerLane: int(s.rowsPerLane, 10, 1, 300),
     triageText,
   }
   // Ready = enough to talk to Jira. A bad optional value (a project key) is reported but does

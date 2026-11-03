@@ -67,7 +67,7 @@ function start(ctx, io = {}) {
     classifying: Promise.resolve(),
     annotateMissing: false, // set when a call proved the reviewer has no annotate
     htmlRejected: null, // the reviewer's message when annotate took text but refused html (0.7/early 0.8)
-    ui: { collapsed: {} },
+    ui: { collapsed: {}, expanded: {} }, // per lane id; `expanded` = Show all pressed
     notice: null, // { text, kind: 'info'|'error' } after an action, until dismissed or replaced
     choose: null, // { key, tabs } when Discuss needs the person to pick a tab
     stopped: false,
@@ -79,7 +79,10 @@ function start(ctx, io = {}) {
 
   const ready = (async () => {
     const ui = await ctx.storage.get('ui').catch(() => undefined)
-    if (ui && typeof ui === 'object' && ui.collapsed && typeof ui.collapsed === 'object') S.ui = { collapsed: { ...ui.collapsed } }
+    if (ui && typeof ui === 'object') {
+      const obj = (v) => (v && typeof v === 'object' ? { ...v } : {})
+      S.ui = { collapsed: obj(ui.collapsed), expanded: obj(ui.expanded) }
+    }
     const t = await ctx.storage.get('triage').catch(() => undefined)
     if (t && t.site === cfg().site && t.verdicts && t.sigs) {
       S.verdicts = t.verdicts
@@ -553,8 +556,12 @@ function start(ctx, io = {}) {
         id: l.id,
         title: l.title,
         collapsed: Boolean(S.ui.collapsed[l.id]),
+        // Only the rows the panel draws are sent: `limit` from the setting, all (capped) after
+        // Show all, so a long Backlog does not cost a big message on every poll.
+        expanded: Boolean(S.ui.expanded[l.id]),
+        limit: cfg().rowsPerLane,
         total: l.rows.length,
-        rows: l.rows.slice(0, ROWS_PER_LANE).map(rowJson),
+        rows: l.rows.slice(0, S.ui.expanded[l.id] ? ROWS_PER_LANE : cfg().rowsPerLane).map(rowJson),
       })),
     }
   }
@@ -599,6 +606,13 @@ function start(ctx, io = {}) {
         case 'toggle':
           if (typeof m.lane === 'string') {
             S.ui.collapsed[m.lane] = !S.ui.collapsed[m.lane]
+            ctx.storage.set('ui', S.ui).catch(() => {})
+            return postState()
+          }
+          return
+        case 'expand':
+          if (typeof m.lane === 'string') {
+            S.ui.expanded[m.lane] = !S.ui.expanded[m.lane]
             ctx.storage.set('ui', S.ui).catch(() => {})
             return postState()
           }

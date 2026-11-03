@@ -23,6 +23,7 @@ test('a complete configuration with defaults', () => {
   assert.equal(r.cfg.doneDays, 14)
   assert.equal(r.cfg.mentionDays, 7)
   assert.equal(r.cfg.pollMinutes, 3)
+  assert.equal(r.cfg.rowsPerLane, 10)
   assert.equal(r.cfg.tokenKind, 'auto')
   assert.equal(r.cfg.triageText, 'full')
 })

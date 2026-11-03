@@ -62,6 +62,7 @@ Settings > This project > Jira, or from a tab: `ccc plugin config bronos.jira <k
 | `apiToken` | | secret, Settings only |
 | `tokenKind` | `auto` | `auto`, `classic` or `scoped` |
 | `lanes` | backlog, inProgress, mentioned on; onHold, done off | a hidden lane is not fetched and never sent to triage |
+| `rowsPerLane` | 10 | issues a lane shows; the rest behind Show all at the bottom of the lane (remembered per lane) |
 | `onHoldStatuses` | `[]` | status names counted as On hold (`Waiting`, `Blocked`), any letter case |
 | `doneDays` | 14 | how far back Done looks |
 | `mentionDays` | 7 | how far back Mentioned looks |

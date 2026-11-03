@@ -3,7 +3,7 @@
 Status: design agreed with the user on 2026-11-02; 0.2.0 (same day, after trying 0.1.0): rows
 open on click with hover buttons, and the opened issue is styled HTML with attachments (section
 "The issue view"). External plugin (own repo, for the marketplace). The first source plugin for
-jev-triage. Read-only towards Jira.
+jev-triage. Read-only towards Jira. 0.3.0: an "Issues per lane" setting with Show all / Hide.
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
@@ -27,6 +27,8 @@ person's choice; default right) with lanes; CLI `ccc jira`.
 - `lanes`: which lanes to show, each a boolean: `backlog` (default on), `inProgress` (on),
   `mentioned` (on), `onHold` (off), `done` (off). A hidden lane is not fetched (when it needs its
   own query) and never sent to triage.
+- `rowsPerLane` (default 10, 1..300): how many issues a lane shows; a longer lane ends in a
+  Show all (N more) / Hide (N) button, remembered per lane like a collapsed one (since 0.3.0).
 - `onHoldStatuses`: status names counted as On hold (`Waiting`, `Blocked`, ...), case-insensitive.
 - `doneDays` (default 14), `mentionDays` (default 7): how far back Done and Mentioned look.
 - `mentionProjects`: project keys searched for mentions; empty = the projects of the person's

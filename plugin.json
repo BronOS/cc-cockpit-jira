@@ -1,7 +1,7 @@
 {
   "id": "bronos.jira",
   "name": "Jira",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "api": 1,
   "main": "dist/host.js",
   "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Read-only towards Jira.",
@@ -65,6 +65,14 @@
               "done": { "type": "boolean", "title": "Done", "default": false }
             },
             "default": { "backlog": true, "inProgress": true, "mentioned": true, "onHold": false, "done": false }
+          },
+          "rowsPerLane": {
+            "type": "integer",
+            "title": "Issues per lane",
+            "description": "How many issues a lane shows; the rest are behind Show all at the bottom of the lane.",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 10
           },
           "onHoldStatuses": {
             "type": "array",

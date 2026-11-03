@@ -170,7 +170,13 @@ function renderLanes() {
       const ul = el('ul')
       for (const r of lane.rows) ul.append(renderRow(r))
       s.append(ul)
-      if (lane.total > lane.rows.length) s.append(el('p', { class: 'empty', text: `${lane.total - lane.rows.length} more not shown.` }))
+      // Show all / Hide below a lane longer than the "Issues per lane" setting; the host keeps
+      // which lanes are open, so a poll or reopening the panel does not fold them again.
+      const extra = lane.total - lane.limit
+      if (extra > 0) {
+        s.append(el('button', { type: 'button', class: 'lane-more', 'aria-expanded': String(lane.expanded), onclick: () => post('expand', { lane: lane.id }), text: lane.expanded ? `Hide (${extra})` : `Show all (${extra} more)` }))
+      }
+      if (lane.expanded && lane.total > lane.rows.length) s.append(el('p', { class: 'empty', text: `${lane.total - lane.rows.length} more not shown.` }))
     }
     box.append(s)
   }
