@@ -228,10 +228,13 @@ function fakeCtx(opts = {}) {
       provide(name, impl) {
         ctx.provided[name] = impl
       },
-      emit() {},
+      emit(service, event, data) {
+        ctx.emitted.push({ service, event, data })
+      },
       caller: () => ctx.callerId,
     },
     provided: {},
+    emitted: [],
     callerId: undefined,
     async callService(name, method, args = [], as = 'bronos.gmail') {
       const impl = ctx.provided[name]

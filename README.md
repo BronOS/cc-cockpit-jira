@@ -157,6 +157,18 @@ refused at once (`jira: busy ...`, `jira: too many ...`) and logged with the cal
 key is not asked again for 5 minutes. No newer cc-cockpit is needed: plugin services are in every
 app version this plugin runs on (tested against 0.9.2).
 
+## Inbox
+
+The plugin also provides `inbox-feed` (v1) for the Inbox plugin, which lists the items of every
+source in one place. It offers the issues the panel's lanes show (read from the cache, never from
+Jira), best first by this plugin's own triage: the Jev verdict, or without one the rule the status
+and priority imply. Quiet issues (noise) are left out unless nothing else is there; at most 50 a
+call. An item carries the issue key, a `rev` (the issue's `updated`, so Inbox's "done until it
+changes" sees any comment or status change), "KEY summary", "assigned to you · High", the status,
+the due date when set, and whether it is unread here. A click in Inbox opens the issue view with
+the details column, as a row click does. There is no mark-read: opening an issue marks it read here.
+Needs nothing new from the app to provide; Inbox itself needs cc-cockpit 0.9.7.
+
 ## CLI
 
 ```

@@ -19,6 +19,11 @@ const CUTS = {
   full: { description: 60000, comment: 20000, events: 500 },
 }
 
+/** Jira's date-only `duedate` as ms (0 when missing or unreadable). */
+function parseDue(value) {
+  return typeof value === 'string' && /^\d{4}-\d\d-\d\d$/.test(value) ? Date.parse(value) || 0 : 0
+}
+
 /** The header of an issue from a search's `fields` (also the start of a full read). */
 function header(key, f) {
   const status = (f && f.status) || {}
@@ -41,6 +46,9 @@ function header(key, f) {
     updatedAt: parseTime(f.updated),
     created: parseTime(f.created),
     closedAt: parseTime(f.statuscategorychangedate) || parseTime(f.resolutiondate) || 0,
+    // The due date (a plain `2026-11-05`, read as that day's start in UTC), only when set; the feed
+    // for Inbox shows it. Left out otherwise so a header without one keeps its shape.
+    ...(parseDue(f.duedate) ? { dueAt: parseDue(f.duedate) } : {}),
   }
 }
 

@@ -22,6 +22,7 @@ const { hashOf, oneLine, cut, issueKey } = require('./lib/util')
 const { issueDocument, HTML_MAX_BYTES } = require('./lib/document')
 const { statusLane } = require('./lib/lanes')
 const svc = require('./lib/service')
+const feed = require('./lib/feed')
 const { headerSpec } = require('./lib/header')
 const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_CHARS, WAIT_MS } = require('./lib/images')
 const path = require('node:path')
@@ -62,6 +63,7 @@ function start(ctx, io = {}) {
     lastPoll: 0,
     polling: null, // the running poll's promise: one at a time
     error: null, // the last poll's failure, shown as a notice
+    errorKind: null, // its client error kind ('auth' when Jira refused the token), for the inbox feed's state
     laneErrors: {},
     stats: null,
     verdicts: {}, // key -> { priority, kind, confidence, by }
@@ -170,6 +172,7 @@ function start(ctx, io = {}) {
         S.stats = r.stats
         S.laneErrors = r.laneErrors
         S.error = null
+        S.errorKind = null
         if (!S.seen || S.seen.accountId !== S.cache.me.accountId) S.seen = loadSeen(await ctx.storage.get('seen').catch(() => undefined), cfg().site, S.cache.me.accountId)
         rebuild()
         // First runs: what is there now counts as seen (seen.js explains when seeding ends).
@@ -186,10 +189,13 @@ function start(ctx, io = {}) {
         await classifyChanged()
       } catch (e) {
         S.error = e && e.message ? e.message : String(e)
+        S.errorKind = e && typeof e.kind === 'string' ? e.kind : null
         ctx.log.error(`poll (${reason}) failed: ${S.error}${e && e.detail ? ` (${e.detail})` : ''}`)
       } finally {
         S.polling = null
         postState()
+        // After a failed poll too: the feed's state (signed out, error) changed.
+        feedChanged()
       }
     })()
     postState()
@@ -339,6 +345,7 @@ function start(ctx, io = {}) {
     await saveSeen()
     rebuild()
     postState()
+    feedChanged()
     // Unread changes the hint, so the item's hash: only this issue is judged again.
     void classifyChanged()
   }
@@ -371,6 +378,7 @@ function start(ctx, io = {}) {
       await saveSeen()
       rebuild()
       postState()
+      feedChanged()
       void classifyChanged()
     }
     // Two builds at most: the reviewer's (with the details column when it takes one) and our own
@@ -681,6 +689,56 @@ function start(ctx, io = {}) {
       // The caller is read before the first await (it names who a refusal in the log was for).
       issue: (key, opts) => serviceIssue(key, opts, caller()),
       document: (key, opts) => serviceDocument(key, opts, caller()),
+    })
+  }
+
+  // ---- the inbox-feed service (v1; Inbox's contract, lib/feed.js) ----
+  //
+  // Inbox (and any plugin that collects `inbox-feed`) reads the issues the panel shows. Answers come
+  // from the cache the panel draws from, never from Jira. No `markRead`: Jira's seen marks are the
+  // plugin's own, and opening an issue already sets them (features() says so).
+
+  /** Tells Inbox to read again; a missing emit (an older app) or a failing one never breaks a poll. */
+  function feedChanged() {
+    if (S.stopped || typeof ctx.services.emit !== 'function') return
+    try {
+      ctx.services.emit('inbox-feed', 'changed', {})
+    } catch (e) {
+      ctx.log.warn('inbox-feed changed:', e && e.message ? e.message : String(e))
+    }
+  }
+
+  async function feedItems(o) {
+    const { limit } = feed.itemsOptions(o)
+    await ready
+    const items = feed.buildItems(allRows(S.view), { limit, mentionedBy })
+    const asOf = S.lastPoll || now()
+    if (!S.settings.ready) return { items, asOf, state: 'signedOut', message: feed.feedMessage(`Jira is not configured (${missingText(S.settings.missing).join(', ') || S.settings.problems.join('; ')})`) }
+    // Jira refused the token (expired, revoked): the cached items still come, marked signed out.
+    if (S.error && S.errorKind === 'auth') return { items, asOf, state: 'signedOut', message: feed.feedMessage(S.error) }
+    if (S.error) return { items, asOf, state: 'error', message: feed.feedMessage(S.error) }
+    return { items, asOf, state: 'ok' }
+  }
+
+  async function feedOpen(rawKey) {
+    const key = svc.checkKey(rawKey)
+    await ready
+    // Only an issue the feed lists: this call opens an overlay, so another plugin cannot use it to
+    // open any key (the jira service's document() is the call for that, with its limits).
+    if (!rowOf(key)) throw new Error(`jira: ${key} is not in the lanes`)
+    try {
+      await openIssue(key)
+    } catch (e) {
+      throw svc.serviceError(e)
+    }
+  }
+
+  if (typeof ctx.services.provide === 'function') {
+    ctx.services.provide('inbox-feed', {
+      describe: () => ({ ...feed.DESCRIBE }),
+      features: () => [],
+      items: (o) => feedItems(o),
+      open: (id) => feedOpen(id),
     })
   }
 
