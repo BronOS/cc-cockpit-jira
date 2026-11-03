@@ -1,0 +1,326 @@
+{
+  "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+  "id": "10001",
+  "self": "https://acme.atlassian.net/rest/api/3/issue/10001",
+  "key": "ABC-1",
+  "fields": {
+    "summary": "Checkout fails for EU cards",
+    "status": {
+      "self": "https://acme.atlassian.net/rest/api/3/status/3",
+      "name": "In Progress",
+      "id": "3",
+      "statusCategory": {
+        "self": "https://acme.atlassian.net/rest/api/3/statuscategory/4",
+        "id": 4,
+        "key": "indeterminate",
+        "colorName": "blue-gray",
+        "name": "In Progress"
+      }
+    },
+    "priority": {
+      "self": "https://acme.atlassian.net/rest/api/3/priority/2",
+      "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+      "name": "High",
+      "id": "2"
+    },
+    "issuetype": {
+      "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+      "id": "10001",
+      "name": "Bug",
+      "subtask": false,
+      "hierarchyLevel": 0
+    },
+    "updated": "2026-11-01T10:15:00.000+0100",
+    "assignee": {
+      "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+      "accountId": "5b10ac8d82e05b22cc7d4ef5",
+      "displayName": "Oleg Example",
+      "active": true,
+      "accountType": "atlassian",
+      "timeZone": "Europe/Berlin"
+    },
+    "reporter": {
+      "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+      "accountId": "557058:ann-0000-1111",
+      "displayName": "Ann Smith",
+      "active": true,
+      "accountType": "atlassian",
+      "timeZone": "Europe/Berlin"
+    },
+    "project": {
+      "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+      "id": "10000",
+      "key": "ABC",
+      "name": "ABC project",
+      "projectTypeKey": "software"
+    },
+    "created": "2026-10-28T09:00:00.000+0100",
+    "description": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Customers with EU cards get "
+            },
+            {
+              "type": "text",
+              "text": "PAYMENT_DECLINED",
+              "marks": [
+                {
+                  "type": "code"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " at checkout."
+            }
+          ]
+        },
+        {
+          "type": "bulletList",
+          "content": [
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Visa: always"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "listItem",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Mastercard: sometimes"
+                    }
+                  ]
+                },
+                {
+                  "type": "bulletList",
+                  "content": [
+                    {
+                      "type": "listItem",
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "only 3DS"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "codeBlock",
+          "attrs": {
+            "language": "json"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"code\": 402}"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Logs: "
+            },
+            {
+              "type": "text",
+              "text": "dashboard",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://grafana.example.com/d/x"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "comment": {
+      "comments": [
+        {
+          "self": "https://acme.atlassian.net/rest/api/3/issue/10001/comment/100",
+          "id": "100",
+          "author": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+            "accountId": "5b10ac8d82e05b22cc7d4ef5",
+            "displayName": "Oleg Example",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Looking into it."
+                  }
+                ]
+              }
+            ]
+          },
+          "updateAuthor": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+            "accountId": "5b10ac8d82e05b22cc7d4ef5",
+            "displayName": "Oleg Example",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "created": "2026-10-29T10:00:00.000+0100",
+          "updated": "2026-10-29T10:00:00.000+0100",
+          "jsdPublic": true
+        },
+        {
+          "self": "https://acme.atlassian.net/rest/api/3/issue/10001/comment/101",
+          "id": "101",
+          "author": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+            "accountId": "557058:ann-0000-1111",
+            "displayName": "Ann Smith",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "mention",
+                    "attrs": {
+                      "id": "5b10ac8d82e05b22cc7d4ef5",
+                      "text": "@Oleg Example",
+                      "accessLevel": "",
+                      "localId": "m-4ef5"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " can you check the 3DS flow today?"
+                  }
+                ]
+              }
+            ]
+          },
+          "updateAuthor": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+            "accountId": "557058:ann-0000-1111",
+            "displayName": "Ann Smith",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "created": "2026-11-01T10:15:00.000+0100",
+          "updated": "2026-11-01T10:15:00.000+0100",
+          "jsdPublic": true
+        }
+      ],
+      "maxResults": 2,
+      "total": 2,
+      "startAt": 0
+    }
+  },
+  "changelog": {
+    "startAt": 0,
+    "maxResults": 2,
+    "total": 2,
+    "histories": [
+      {
+        "id": "500",
+        "author": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+          "accountId": "5b10ac8d82e05b22cc7d4ef5",
+          "displayName": "Oleg Example",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "created": "2026-10-29T09:55:00.000+0100",
+        "items": [
+          {
+            "field": "status",
+            "fieldtype": "jira",
+            "fieldId": "status",
+            "from": "1",
+            "fromString": "To Do",
+            "to": "3",
+            "toString": "In Progress"
+          }
+        ]
+      },
+      {
+        "id": "501",
+        "author": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+          "accountId": "557058:ann-0000-1111",
+          "displayName": "Ann Smith",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "created": "2026-10-31T08:00:00.000+0100",
+        "items": [
+          {
+            "field": "priority",
+            "fieldtype": "jira",
+            "fieldId": "priority",
+            "from": "3",
+            "fromString": "Medium",
+            "to": "2",
+            "toString": "High"
+          },
+          {
+            "field": "labels",
+            "fieldtype": "jira",
+            "fieldId": "labels",
+            "from": null,
+            "fromString": "",
+            "to": null,
+            "toString": "eu"
+          }
+        ]
+      }
+    ]
+  }
+}

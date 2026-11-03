@@ -1,0 +1,63 @@
+{
+  "issues": [
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10004",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/ABC-4",
+      "key": "ABC-4",
+      "fields": {
+        "summary": "Waiting on legal for the cookie text",
+        "status": {
+          "self": "https://acme.atlassian.net/rest/api/3/status/10010",
+          "name": "Waiting",
+          "id": "10010",
+          "statusCategory": {
+            "self": "https://acme.atlassian.net/rest/api/3/statuscategory/4",
+            "id": 4,
+            "key": "indeterminate",
+            "colorName": "blue-gray",
+            "name": "In Progress"
+          }
+        },
+        "priority": {
+          "self": "https://acme.atlassian.net/rest/api/3/priority/4",
+          "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+          "name": "Low",
+          "id": "4"
+        },
+        "issuetype": {
+          "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+          "id": "10001",
+          "name": "Task",
+          "subtask": false,
+          "hierarchyLevel": 0
+        },
+        "updated": "2026-10-25T09:00:00.000+0200",
+        "assignee": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+          "accountId": "5b10ac8d82e05b22cc7d4ef5",
+          "displayName": "Oleg Example",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "reporter": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=712020:bob-2222-3333",
+          "accountId": "712020:bob-2222-3333",
+          "displayName": "Bob Jones",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "project": {
+          "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+          "id": "10000",
+          "key": "ABC",
+          "name": "ABC project",
+          "projectTypeKey": "software"
+        }
+      }
+    }
+  ],
+  "isLast": true
+}

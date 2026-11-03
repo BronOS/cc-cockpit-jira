@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jira</title>
+    <!-- The panel CSP allows script from this plugin's own files only (no inline script), so the
+      logic lives in main.js. The SDK gives the page `ccPanel` and the app theme variables. Every
+      action is a button: a panel cannot submit a <form> (sandboxed without allow-forms). -->
+    <script src="/__sdk/panel.js"></script>
+    <script src="main.js" defer></script>
+    <style>
+      body { margin: 0; padding: 10px; font: 12px/1.4 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 1px 6px; cursor: pointer; }
+      button:hover { border-color: var(--cc-border-strong); }
+      button:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 1px; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); }
+      button.primary:hover { background: var(--cc-accent-hover); }
+      header { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+      header .grow { flex: 1; min-width: 0; color: var(--cc-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .notice { background: var(--cc-bg-error); border: 1px solid var(--cc-border); border-radius: 4px; padding: 6px 8px; margin-bottom: 8px; display: flex; gap: 6px; align-items: flex-start; }
+      .notice.info { background: var(--cc-bg-banner); }
+      .notice .text { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .notice .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+      .muted { color: var(--cc-fg-muted); }
+      section { margin-bottom: 6px; }
+      .lane-head { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; background: var(--cc-surface-1); border: none; border-radius: 4px; padding: 3px 6px; font-weight: 600; }
+      .lane-head .count { color: var(--cc-fg-muted); font-weight: normal; }
+      .lane-head .chev { width: 10px; color: var(--cc-fg-subtle); }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li.row { border-bottom: 1px solid var(--cc-border); padding: 4px 2px; }
+      .line { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+      .key { font-family: ui-monospace, monospace; color: var(--cc-fg-muted); white-space: nowrap; }
+      .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .unread .summary { font-weight: 600; }
+      .sub { display: flex; gap: 6px; padding-left: 14px; color: var(--cc-fg-muted); font-size: 11px; }
+      .sub .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .new { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--cc-accent); color: var(--cc-accent-fg); }
+      /* The triage dot: the priority's colour, hollow below 0.5 confidence (as in the Jev triage panel). */
+      .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; border: 2px solid currentColor; background: currentColor; box-sizing: border-box; }
+      .dot.low { background: transparent; }
+      .dot.none { color: transparent; }
+      .p-urgent { color: var(--cc-status-ended); }
+      .p-action { color: var(--cc-status-needs-permission); }
+      .p-fyi { color: var(--cc-status-working); }
+      .p-noise { color: var(--cc-fg-subtle); }
+      .actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px 14px; }
+      .actions button { font-size: 11px; }
+      .wrong { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 2px 0 2px 14px; padding: 4px 6px; background: var(--cc-surface-2); border-radius: 4px; }
+      .empty { color: var(--cc-fg-muted); padding: 6px 2px; }
+      code { font-family: ui-monospace, monospace; background: var(--cc-surface-2); padding: 0 3px; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Jira</strong>
+      <span id="meta" class="grow"></span>
+      <button id="refresh" type="button" title="Poll Jira now">Refresh</button>
+    </header>
+    <div id="notices"></div>
+    <div id="lanes"></div>
+  </body>
+</html>

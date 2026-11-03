@@ -1,0 +1,117 @@
+{
+  "id": "10007",
+  "self": "https://acme.atlassian.net/rest/api/3/issue/10007",
+  "key": "ABC-7",
+  "fields": {
+    "summary": "Flaky test in payments",
+    "status": {
+      "self": "https://acme.atlassian.net/rest/api/3/status/1",
+      "name": "To Do",
+      "id": "1",
+      "statusCategory": {
+        "self": "https://acme.atlassian.net/rest/api/3/statuscategory/2",
+        "id": 2,
+        "key": "new",
+        "colorName": "blue-gray",
+        "name": "To Do"
+      }
+    },
+    "priority": {
+      "self": "https://acme.atlassian.net/rest/api/3/priority/4",
+      "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+      "name": "Low",
+      "id": "4"
+    },
+    "issuetype": {
+      "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+      "id": "10001",
+      "name": "Bug",
+      "subtask": false,
+      "hierarchyLevel": 0
+    },
+    "updated": "2026-10-31T08:00:00.000+0000",
+    "assignee": null,
+    "reporter": {
+      "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+      "accountId": "557058:ann-0000-1111",
+      "displayName": "Ann Smith",
+      "active": true,
+      "accountType": "atlassian",
+      "timeZone": "Europe/Berlin"
+    },
+    "project": {
+      "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+      "id": "10000",
+      "key": "ABC",
+      "name": "ABC project",
+      "projectTypeKey": "software"
+    },
+    "created": "2026-10-31T08:00:00.000+0000",
+    "description": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Fails one run in ten."
+            }
+          ]
+        }
+      ]
+    },
+    "comment": {
+      "comments": [
+        {
+          "self": "https://acme.atlassian.net/rest/api/3/issue/10001/comment/400",
+          "id": "400",
+          "author": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+            "accountId": "557058:ann-0000-1111",
+            "displayName": "Ann Smith",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Seen again on main."
+                  }
+                ]
+              }
+            ]
+          },
+          "updateAuthor": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+            "accountId": "557058:ann-0000-1111",
+            "displayName": "Ann Smith",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "created": "2026-10-31T08:00:00.000+0000",
+          "updated": "2026-10-31T08:00:00.000+0000",
+          "jsdPublic": true
+        }
+      ],
+      "maxResults": 1,
+      "total": 1,
+      "startAt": 0
+    }
+  },
+  "changelog": {
+    "startAt": 0,
+    "maxResults": 0,
+    "total": 0,
+    "histories": []
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "cc-cockpit-jira",
+  "private": true,
+  "description": "Tests for the bronos.jira cc-cockpit plugin; the plugin itself needs no install or build.",
+  "scripts": { "test": "node --test test/" }
+}

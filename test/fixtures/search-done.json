@@ -1,0 +1,65 @@
+{
+  "issues": [
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10003",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/ABC-3",
+      "key": "ABC-3",
+      "fields": {
+        "summary": "Fix the invoice rounding",
+        "status": {
+          "self": "https://acme.atlassian.net/rest/api/3/status/5",
+          "name": "Done",
+          "id": "5",
+          "statusCategory": {
+            "self": "https://acme.atlassian.net/rest/api/3/statuscategory/3",
+            "id": 3,
+            "key": "done",
+            "colorName": "blue-gray",
+            "name": "Done"
+          }
+        },
+        "priority": {
+          "self": "https://acme.atlassian.net/rest/api/3/priority/3",
+          "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+          "name": "Medium",
+          "id": "3"
+        },
+        "issuetype": {
+          "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+          "id": "10001",
+          "name": "Bug",
+          "subtask": false,
+          "hierarchyLevel": 0
+        },
+        "updated": "2026-10-29T12:00:00.000+0100",
+        "assignee": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+          "accountId": "5b10ac8d82e05b22cc7d4ef5",
+          "displayName": "Oleg Example",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "reporter": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+          "accountId": "557058:ann-0000-1111",
+          "displayName": "Ann Smith",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "project": {
+          "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+          "id": "10000",
+          "key": "ABC",
+          "name": "ABC project",
+          "projectTypeKey": "software"
+        },
+        "statuscategorychangedate": "2026-10-29T12:00:00.000+0100",
+        "resolutiondate": "2026-10-29T12:00:00.000+0100"
+      }
+    }
+  ],
+  "isLast": true
+}

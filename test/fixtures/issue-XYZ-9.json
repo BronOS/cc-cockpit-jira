@@ -1,0 +1,137 @@
+{
+  "id": "10009",
+  "self": "https://acme.atlassian.net/rest/api/3/issue/10009",
+  "key": "XYZ-9",
+  "fields": {
+    "summary": "Release notes for 4.2",
+    "status": {
+      "self": "https://acme.atlassian.net/rest/api/3/status/10020",
+      "name": "In Review",
+      "id": "10020",
+      "statusCategory": {
+        "self": "https://acme.atlassian.net/rest/api/3/statuscategory/4",
+        "id": 4,
+        "key": "indeterminate",
+        "colorName": "blue-gray",
+        "name": "In Progress"
+      }
+    },
+    "priority": {
+      "self": "https://acme.atlassian.net/rest/api/3/priority/3",
+      "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+      "name": "Medium",
+      "id": "3"
+    },
+    "issuetype": {
+      "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+      "id": "10001",
+      "name": "Story",
+      "subtask": false,
+      "hierarchyLevel": 0
+    },
+    "updated": "2026-11-01T16:40:00.000+0000",
+    "assignee": {
+      "self": "https://acme.atlassian.net/rest/api/3/user?accountId=712020:bob-2222-3333",
+      "accountId": "712020:bob-2222-3333",
+      "displayName": "Bob Jones",
+      "active": true,
+      "accountType": "atlassian",
+      "timeZone": "Europe/Berlin"
+    },
+    "reporter": {
+      "self": "https://acme.atlassian.net/rest/api/3/user?accountId=712020:bob-2222-3333",
+      "accountId": "712020:bob-2222-3333",
+      "displayName": "Bob Jones",
+      "active": true,
+      "accountType": "atlassian",
+      "timeZone": "Europe/Berlin"
+    },
+    "project": {
+      "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+      "id": "10000",
+      "key": "XYZ",
+      "name": "XYZ project",
+      "projectTypeKey": "software"
+    },
+    "created": "2026-10-30T09:00:00.000+0000",
+    "description": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Draft the notes."
+            }
+          ]
+        }
+      ]
+    },
+    "comment": {
+      "comments": [
+        {
+          "self": "https://acme.atlassian.net/rest/api/3/issue/10001/comment/300",
+          "id": "300",
+          "author": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=712020:bob-2222-3333",
+            "accountId": "712020:bob-2222-3333",
+            "displayName": "Bob Jones",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Need a line about payments from "
+                  },
+                  {
+                    "type": "mention",
+                    "attrs": {
+                      "id": "5b10ac8d82e05b22cc7d4ef5",
+                      "text": "@Oleg Example",
+                      "accessLevel": "",
+                      "localId": "m-4ef5"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "."
+                  }
+                ]
+              }
+            ]
+          },
+          "updateAuthor": {
+            "self": "https://acme.atlassian.net/rest/api/3/user?accountId=712020:bob-2222-3333",
+            "accountId": "712020:bob-2222-3333",
+            "displayName": "Bob Jones",
+            "active": true,
+            "accountType": "atlassian",
+            "timeZone": "Europe/Berlin"
+          },
+          "created": "2026-11-01T16:40:00.000+0000",
+          "updated": "2026-11-01T16:40:00.000+0000",
+          "jsdPublic": true
+        }
+      ],
+      "maxResults": 1,
+      "total": 1,
+      "startAt": 0
+    }
+  },
+  "changelog": {
+    "startAt": 0,
+    "maxResults": 0,
+    "total": 0,
+    "histories": []
+  }
+}

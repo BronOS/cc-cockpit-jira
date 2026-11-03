@@ -1,0 +1,136 @@
+{
+  "id": "bronos.jira",
+  "name": "Jira",
+  "version": "0.1.0",
+  "api": 1,
+  "main": "dist/host.js",
+  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Read-only towards Jira.",
+  "author": "Oleg Bronzov",
+  "license": "MIT",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "Jira",
+        "icon": "icons/jira.svg",
+        "entry": "panels/main.html",
+        "defaultZone": "right"
+      }
+    ],
+    "settings": {
+      "project": {
+        "type": "object",
+        "properties": {
+          "site": {
+            "type": "string",
+            "title": "Site",
+            "description": "Your Jira Cloud address, https only: https://<name>.atlassian.net",
+            "maxLength": 200,
+            "default": ""
+          },
+          "email": {
+            "type": "string",
+            "title": "Email",
+            "description": "The email of your Atlassian account (the one the API token belongs to).",
+            "maxLength": 254,
+            "default": ""
+          },
+          "apiToken": {
+            "type": "string",
+            "format": "secret",
+            "title": "API token",
+            "description": "Create one at id.atlassian.com > Security > API tokens. A token with scopes works too (read-only: read:jira-work and read:jira-user). Tokens expire: when Jira refuses it, create a new one here."
+          },
+          "tokenKind": {
+            "type": "string",
+            "title": "Token kind",
+            "description": "Auto tries the site first and, when it refuses the token, the Atlassian API gateway (where tokens with scopes work).",
+            "oneOf": [
+              { "const": "auto", "title": "Auto" },
+              { "const": "classic", "title": "Classic (no scopes)" },
+              { "const": "scoped", "title": "With scopes" }
+            ],
+            "default": "auto"
+          },
+          "lanes": {
+            "type": "object",
+            "title": "Lanes",
+            "description": "Which lanes to show. A hidden lane is not fetched and never sent to triage.",
+            "additionalProperties": false,
+            "properties": {
+              "backlog": { "type": "boolean", "title": "Backlog (To Do)", "default": true },
+              "inProgress": { "type": "boolean", "title": "In progress", "default": true },
+              "mentioned": { "type": "boolean", "title": "Mentioned (issues not assigned to you)", "default": true },
+              "onHold": { "type": "boolean", "title": "On hold", "default": false },
+              "done": { "type": "boolean", "title": "Done", "default": false }
+            },
+            "default": { "backlog": true, "inProgress": true, "mentioned": true, "onHold": false, "done": false }
+          },
+          "onHoldStatuses": {
+            "type": "array",
+            "title": "On hold statuses",
+            "description": "Status names that count as On hold (Waiting, Blocked, Code Review, ...), any letter case.",
+            "maxItems": 50,
+            "items": { "type": "string", "title": "Status", "maxLength": 100 },
+            "default": []
+          },
+          "doneDays": {
+            "type": "integer",
+            "title": "Done: days back",
+            "description": "How far back the Done lane looks.",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 14
+          },
+          "mentionDays": {
+            "type": "integer",
+            "title": "Mentioned: days back",
+            "description": "How far back the Mentioned lane looks for mentions of you.",
+            "minimum": 1,
+            "maximum": 90,
+            "default": 7
+          },
+          "mentionProjects": {
+            "type": "array",
+            "title": "Mentioned: projects",
+            "description": "Project keys searched for mentions of you (ABC, OPS). Empty: the projects of your assigned issues.",
+            "maxItems": 30,
+            "items": { "type": "string", "title": "Project key", "maxLength": 50 },
+            "default": []
+          },
+          "pollMinutes": {
+            "type": "integer",
+            "title": "Poll every (minutes)",
+            "description": "Only while this project's window is open.",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 3
+          },
+          "triageText": {
+            "type": "string",
+            "title": "What triage reads",
+            "description": "Full: the description and comments go to Jev (through Jev triage). Summary: only key, summary, status, priority and type, for employers who object to issue text leaving.",
+            "oneOf": [
+              { "const": "full", "title": "Full (description and comments)" },
+              { "const": "summary", "title": "Summary only" }
+            ],
+            "default": "full"
+          }
+        }
+      }
+    },
+    "cli": [
+      {
+        "name": "jira",
+        "summary": "Jira: status, refresh, list the lanes, show an issue, mark read or unread",
+        "usage": "jira status | refresh | list [lane] | show <KEY> | read <KEY> | unread <KEY> | help"
+      }
+    ]
+  },
+  "services": {
+    "uses": {
+      "triage": 1,
+      "reviewer": 1
+    }
+  }
+}

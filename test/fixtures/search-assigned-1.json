@@ -1,0 +1,122 @@
+{
+  "issues": [
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10001",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/ABC-1",
+      "key": "ABC-1",
+      "fields": {
+        "summary": "Checkout fails for EU cards",
+        "status": {
+          "self": "https://acme.atlassian.net/rest/api/3/status/3",
+          "name": "In Progress",
+          "id": "3",
+          "statusCategory": {
+            "self": "https://acme.atlassian.net/rest/api/3/statuscategory/4",
+            "id": 4,
+            "key": "indeterminate",
+            "colorName": "blue-gray",
+            "name": "In Progress"
+          }
+        },
+        "priority": {
+          "self": "https://acme.atlassian.net/rest/api/3/priority/2",
+          "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+          "name": "High",
+          "id": "2"
+        },
+        "issuetype": {
+          "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+          "id": "10001",
+          "name": "Bug",
+          "subtask": false,
+          "hierarchyLevel": 0
+        },
+        "updated": "2026-11-01T10:15:00.000+0100",
+        "assignee": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+          "accountId": "5b10ac8d82e05b22cc7d4ef5",
+          "displayName": "Oleg Example",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "reporter": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=557058:ann-0000-1111",
+          "accountId": "557058:ann-0000-1111",
+          "displayName": "Ann Smith",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "project": {
+          "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+          "id": "10000",
+          "key": "ABC",
+          "name": "ABC project",
+          "projectTypeKey": "software"
+        }
+      }
+    },
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10002",
+      "self": "https://acme.atlassian.net/rest/api/3/issue/ABC-2",
+      "key": "ABC-2",
+      "fields": {
+        "summary": "Update the onboarding copy",
+        "status": {
+          "self": "https://acme.atlassian.net/rest/api/3/status/1",
+          "name": "To Do",
+          "id": "1",
+          "statusCategory": {
+            "self": "https://acme.atlassian.net/rest/api/3/statuscategory/2",
+            "id": 2,
+            "key": "new",
+            "colorName": "blue-gray",
+            "name": "To Do"
+          }
+        },
+        "priority": {
+          "self": "https://acme.atlassian.net/rest/api/3/priority/3",
+          "iconUrl": "https://acme.atlassian.net/images/icons/priorities/x.svg",
+          "name": "Medium",
+          "id": "3"
+        },
+        "issuetype": {
+          "self": "https://acme.atlassian.net/rest/api/3/issuetype/10001",
+          "id": "10001",
+          "name": "Task",
+          "subtask": false,
+          "hierarchyLevel": 0
+        },
+        "updated": "2026-10-20T09:00:00.000+0200",
+        "assignee": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+          "accountId": "5b10ac8d82e05b22cc7d4ef5",
+          "displayName": "Oleg Example",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "reporter": {
+          "self": "https://acme.atlassian.net/rest/api/3/user?accountId=5b10ac8d82e05b22cc7d4ef5",
+          "accountId": "5b10ac8d82e05b22cc7d4ef5",
+          "displayName": "Oleg Example",
+          "active": true,
+          "accountType": "atlassian",
+          "timeZone": "Europe/Berlin"
+        },
+        "project": {
+          "self": "https://acme.atlassian.net/rest/api/3/project/10000",
+          "id": "10000",
+          "key": "ABC",
+          "name": "ABC project",
+          "projectTypeKey": "software"
+        }
+      }
+    }
+  ],
+  "nextPageToken": "CAEaAggD",
+  "isLast": false
+}
