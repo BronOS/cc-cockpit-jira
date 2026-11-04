@@ -32,6 +32,8 @@ const SOURCE = 'jira' // the triage source name: verdicts, overrides and cases g
 const TRIAGE_CHUNK = 500 // triage.classify takes at most 500 items a call
 const ROWS_PER_LANE = 300 // the panel message stays far below the 1 MiB post limit
 const CLI_WAIT_MS = 25000 // `ccc` gives a handler 30 s
+// How long the reviewer's prepare and cancel may take: host-local calls, far under this.
+const REVIEWER_WAIT_MS = 2000
 const IMAGE_TIMEOUT_MS = 20000 // one attachment download, redirects and body included
 // The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON
 // (`ccc guide panels`), and JSON can double a string (quotes, backslashes).
@@ -363,8 +365,50 @@ function start(ctx, io = {}) {
    *   -> "no method annotate" (0.7.0) or no reviewer -> panels/issue.html with the same HTML.
    * A refusal of html is remembered for the run only when the text call then worked, so a
    * failure that has nothing to do with html (the overlay could not open) does not switch modes.
+   * The reviewer's overlay is up before the issue is read (its prepare, where it has one): reading
+   * the issue with its comments and images takes seconds, with nothing on screen meanwhile
+   * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
+   * read, our own reader page) closes it in the finally.
    */
   async function openIssue(key) {
+    const pre = await prepareView(key)
+    try {
+      await showIssue(key, pre)
+    } finally {
+      if (pre) await cancelView(pre)
+    }
+  }
+
+  /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
+  function within(p, ms) {
+    let timer
+    return Promise.race([p, new Promise((_, rej) => (timer = setTimeout(() => rej(new Error('the reviewer did not answer in time')), ms)))]).finally(() => clearTimeout(timer))
+  }
+
+  /**
+   * Opens the reviewer's overlay of an issue now, with its loader, under the key and title the
+   * annotate gives it (the summary from the last poll): `{ key }` when it did, else null (no reviewer
+   * with annotate, or one without prepare, which rejects with "has no method": the overlay then comes
+   * with the annotate, as before).
+   */
+  async function prepareView(key) {
+    if (!annotateOn()) return null
+    const row = rowOf(key)
+    const title = row && row.issue.summary ? `${key}: ${oneLine(row.issue.summary)}` : key
+    try {
+      await within(reviewer.prepare({ key: `jira:${key}`, title: title.slice(0, 200) }), REVIEWER_WAIT_MS)
+      return { key: `jira:${key}` }
+    } catch {
+      return null
+    }
+  }
+
+  /** Closes a prepared overlay no annotate filled; a no-op once one did. */
+  async function cancelView(pre) {
+    await within(reviewer.cancel({ key: pre.key }), REVIEWER_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
+  }
+
+  async function showIssue(key, pre) {
     const got = await fullIssue(key)
     const { issue, lane, mark, stale } = got
     const site = cfg().site
@@ -423,6 +467,8 @@ function start(ctx, io = {}) {
         }
       }
     }
+    // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
+    if (pre) await cancelView(pre)
     await plainReader(issue, await view(), url)
   }
 
@@ -517,7 +563,8 @@ function start(ctx, io = {}) {
 
   async function newSession(key) {
     const { prompt } = await issuePrompt(key)
-    await ctx.sessions.open({ prompt })
+    // The person clicked New session: the window shows the tab (an older app ignores `focus`).
+    await ctx.sessions.open({ prompt, focus: true })
     setNotice(`Opened a new Claude tab about ${key}.`)
   }
 

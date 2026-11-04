@@ -166,6 +166,43 @@ test('Open with the html reviewer (0.8.0): styled HTML, the image as an asset, t
   await h.stop()
 })
 
+// Real-work feedback 8: the overlay came only after the issue was read.
+test('Open with a reviewer that has prepare: the overlay is up before the issue is read, then filled', async () => {
+  const order = []
+  let reads = () => 0
+  const reviewer = {
+    prepare: async (spec) => (order.push(['prepare', spec, reads()]), { opened: true }),
+    cancel: async (spec) => (order.push(['cancel', spec.key]), { closed: false }),
+    annotate: async (spec) => (order.push(['annotate', spec.key]), { opened: true }),
+  }
+  const { ctx, h, jira } = boot({ reviewer, jira: attJira() })
+  await h.pollNow('test')
+  reads = () => jira.calls.filter((x) => /\/issue\/ABC-1|attachment/.test(x.url)).length
+  const before = reads()
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.deepEqual(order[0], ['prepare', { key: 'jira:ABC-1', title: 'ABC-1: Checkout fails for EU cards' }, before])
+  assert.ok(reads() > before, 'the open read the issue, after prepare')
+  assert.deepEqual(order.slice(1), [['annotate', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
+  await h.stop()
+})
+
+test('Open with prepare: an open that fails cancels the loading overlay', async () => {
+  const calls = []
+  const reviewer = {
+    prepare: async (spec) => (calls.push(['prepare', spec.key]), { opened: true }),
+    cancel: async (spec) => (calls.push(['cancel', spec.key]), { closed: true }),
+    annotate: async () => {
+      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+    },
+  }
+  const { ctx, h } = boot({ reviewer, jira: attJira() })
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.deepEqual(calls, [['prepare', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
+  assert.match(ctx.lastState().notice.text, /could not open ABC-1/)
+  await h.stop()
+})
+
 test('a slow image does not hold the open: after the wait it is a link, and the open goes on', async () => {
   const calls = []
   const reviewer = { annotate: async (spec) => (calls.push(spec), {}) }
@@ -248,6 +285,7 @@ test('Open on an app without annotate: our own page gets the same HTML and the i
   await opening
   assert.equal(ctx.opened.length, 1)
   assert.match(ctx.opened[0].prompt, /^About Jira ABC-1: Checkout fails for EU cards\n/)
+  assert.equal(ctx.opened[0].focus, true, 'the new tab is shown')
   assert.equal(ctx.lastState().annotate, false)
   await h.stop()
 })
