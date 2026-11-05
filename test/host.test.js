@@ -546,6 +546,13 @@ test('issue overlays: the reader page starts at once with the inbox-item type an
   await h.stop()
 })
 
+test('issue overlays: an issue not in the cached rows opens with the bare key as title, with no dangling colon', async () => {
+  const { ctx, h } = boot({ reviewer: null })
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(ctx.overlays[0].spec.title, 'ABC-1')
+  await h.stop()
+})
+
 test('issue overlays: an older app (no ctx.overlay.buttons) keeps the page buttons and still opens', async () => {
   const { ctx, h } = boot({ reviewer: null, noButtons: true })
   await h.pollNow('test')

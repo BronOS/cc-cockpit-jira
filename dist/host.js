@@ -567,16 +567,15 @@ function start(ctx, io = {}) {
   }
 
   /**
-   * Without the reviewer's annotate: our own read-only page with Discuss, New session and ↗. It
-   * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
-   * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
+   * Starts the reader page's overlay (before the issue is read when it can); null when the app refuses.
+   * The overlay API cannot retitle an open overlay, so with no cached summary the title is the bare key
+   * (no dangling `KEY: `).
    */
-  /** Starts the reader page's overlay (before the issue is read when it can); null when the app refuses. */
   function startReader(key, issue) {
     const row = issue ? null : rowOf(key)
     const summary = issue ? issue.summary : row ? row.issue.summary : ''
     try {
-      const handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: `${key}: ${cut(oneLine(summary || ''), 80)}`, size: 'large', ready: 'manual', type: overlayType(key) })
+      const handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: summary ? `${key}: ${cut(oneLine(summary), 80)}` : key, size: 'large', ready: 'manual', type: overlayType(key) })
       if (typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(key))
       return { handle, used: false }
     } catch (e) {
@@ -585,6 +584,11 @@ function start(ctx, io = {}) {
     }
   }
 
+  /**
+   * Without the reviewer's annotate: our own read-only page with Discuss, New session and ↗. It
+   * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
+   * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
+   */
   async function plainReader(issue, view, url, early) {
     const started = early || startReader(issue.key, issue)
     if (!started) return
