@@ -131,10 +131,10 @@ function abc1WithAttachments() {
 }
 const attJira = (extra = {}) => ({ issues: { 'ABC-1': abc1WithAttachments() }, attachments: { 10001: picture('png', 300) }, ...extra })
 
-test('Open with the html reviewer (0.8.0): styled HTML, the image as an asset, the active tab; it marks read', async () => {
+test('Open with the html reviewer (0.8.0): styled HTML, the image as an asset, the active tab; with markReadOnOpen it marks read', async () => {
   const calls = []
   const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
-  const { ctx, h, jira } = boot({ reviewer, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })], jira: attJira() })
+  const { ctx, h, jira } = boot({ reviewer, project: { ...CONFIGURED, markReadOnOpen: true }, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })], jira: attJira() })
   await h.pollNow('test')
   await ctx.runCli(['unread', 'ABC-1'])
   assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, true)
@@ -163,6 +163,23 @@ test('Open with the html reviewer (0.8.0): styled HTML, the image as an asset, t
   assert.equal(jira.calls.filter((x) => x.url.startsWith(MEDIA)).length, 1)
   assert.equal(calls[1].assets.length, 1)
   assert.match((await ctx.runCli(['status'])).stdout, /HTML with its images/)
+  await h.stop()
+})
+
+// The person's request: opening an issue to glance at it must not clear its unread mark unless they ask for that.
+test('Open with markReadOnOpen off (the default): the issue stays unread; Read still marks it read', async () => {
+  const calls = []
+  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
+  const { ctx, h } = boot({ reviewer })
+  await h.pollNow('test')
+  await ctx.runCli(['unread', 'ABC-1'])
+  const marks = JSON.stringify(h.S.seen)
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(calls.length, 1, 'the issue was shown')
+  assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, true)
+  assert.equal(JSON.stringify(h.S.seen), marks, 'the open left the seen marks (and the Mark unread flag) as they were')
+  await ctx.sendPanel({ type: 'read', key: 'ABC-1' })
+  assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, false)
   await h.stop()
 })
 

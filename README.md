@@ -9,7 +9,8 @@ to discuss. It is **read-only towards Jira**: it never comments, transitions or 
   else commented, changed its status / assignee / priority, assigned it to you or mentioned you
   after you last looked. The first run marks everything as seen, so only what happens next is new.
   Unread rows have an accent bar, bold text and a "new" / "N new" pill. **Mark unread** works on any
-  issue (except Done) as a reminder ("unread" pill), cleared when you open it; it does not change triage.
+  issue (except Done) as a reminder ("unread" pill), cleared by Mark read; it does not change triage.
+  Opening an issue leaves it unread unless you turn on `markReadOnOpen` (off by default).
 - **Triage**: each lane is sorted by priority (urgent, action, fyi, noise), then the newest
   activity. Simple cases are decided by the plugin's own hints (Done is noise, an unread High
   issue is urgent, ...); the rest is judged by Jev through jev-triage.
@@ -68,6 +69,7 @@ Settings > This project > Jira, or from a tab: `ccc plugin config bronos.jira <k
 | `tokenKind` | `auto` | `auto`, `classic` or `scoped` |
 | `lanes` | backlog, inProgress, mentioned on; onHold, done off | a hidden lane is not fetched and never sent to triage |
 | `rowsPerLane` | 10 | issues a lane shows; the rest behind Show all at the bottom of the lane (remembered per lane) |
+| `markReadOnOpen` | off | "Mark an issue read when I open it": off, opening an issue (from the panel or from Inbox) leaves it unread until Mark read; on, opening marks it read |
 | `onHoldStatuses` | `[]` | status names counted as On hold (`Waiting`, `Blocked`), any letter case |
 | `doneDays` | 14 | how far back Done looks |
 | `mentionDays` | 7 | how far back Mentioned looks |
@@ -96,7 +98,7 @@ Mentioned candidate and looks for a mention of you. An assigned issue where you 
 stays in its own lane, marked unread. Issues are read in full only when their `updated` changed
 (at most 120 a poll, 4 at a time; the rest come with the next polls).
 
-**Click a row** (or press Enter on it) to open the issue (see below); opening marks it read. The
+**Click a row** (or press Enter on it) to open the issue (see below); opening marks it read only with `markReadOnOpen` on. The
 other actions are small buttons that show while the pointer is over a row or the row has the
 keyboard focus: **↗** (the issue in your browser), **Read / Unread**, the triage verdict (**action ▾**: change how much
 the issue needs you; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel), **Discuss**
@@ -172,7 +174,8 @@ issue that is not yours `assignee:<name>` or `unassigned`, and your Jira labels 
 The `rev` is the issue's `updated`, so Inbox's "done until it changes" sees any comment or status
 change; marking read does not move it. The preview is the latest comment, else the start of the
 description. Actions: Open (the issue view with the details column, as a row click does) and Mark
-read / Mark unread (this plugin's own seen marks).
+read / Mark unread (this plugin's own seen marks). Open marks the item read only with `markReadOnOpen`
+on; off (the default), the item keeps `read: false` and no event after the open says otherwise.
 
 The plugin tells Inbox what changed (`item`, `gone`, and a `sync` when its state changes: not set
 up, a refused token, an error, a recovery) after each poll, mark and settings change. Needs

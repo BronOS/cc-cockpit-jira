@@ -34,6 +34,9 @@ person's choice; default right) with lanes; CLI `ccc jira`.
   own query) and never sent to triage.
 - `rowsPerLane` (default 10, 1..300): how many issues a lane shows; a longer lane ends in a
   Show all (N more) / Hide (N) button, remembered per lane like a collapsed one (since 0.3.0).
+- `markReadOnOpen` (default off): "Mark an issue read when I open it". Off, opening an issue (a
+  row, the feed's `act` open) never changes its seen mark or flag, so Inbox's item stays unread;
+  on, an open that reached the screen marks it read. Mark read / Mark unread work either way.
 - `onHoldStatuses`: status names counted as On hold (`Waiting`, `Blocked`, ...), case-insensitive.
 - `doneDays` (default 14), `mentionDays` (default 7): how far back Done and Mentioned look.
 - `mentionProjects`: project keys searched for mentions; empty = the projects of the person's
@@ -75,10 +78,11 @@ From the status category: To Do -> Backlog, In Progress -> In progress, except a
 
 An issue is unread while someone else commented, changed its status / assignee / priority,
 assigned it to the person, or mentioned them after the time they last saw it. Seen = the time of
-the newest activity when the person opened the issue (the overlay) or pressed Mark read; Mark
+the newest activity when the person pressed Mark read (or opened the issue, with `markReadOnOpen`); Mark
 unread sets it just before the newest activity of others. The first run marks everything seen as
 it is, so only what happens next is new. Stored per project, bounded. Since 0.4.0 Mark unread
-works on every issue but Done: it also sets a flag (unread until opened or Mark read), so an issue
+works on every issue but Done: it also sets a flag (unread until Mark read, or an open with
+`markReadOnOpen`), so an issue
 whose activity is all the person's own can be a reminder; flags do not change triage (it goes by
 others' activity, `newCount`).
 

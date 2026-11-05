@@ -405,6 +405,7 @@ test('act open: the app refusing our reader page is the act\'s refusal, with the
 // Round-4 review: main never throws from start(); its refusal (3 open, 10 a minute) rejects the
 // handle's result a moment later, and act answered ok for a reader page that never opened. And the
 // issue was marked seen (read: true to Inbox) right after the read, before anything was shown.
+const ON = { ...CONFIGURED, markReadOnOpen: true }
 const readOf = async (b, key) => (await b.ctx.callService('inbox-feed', 'snapshot')).items.find((i) => i.id === key).read
 
 test('act open: a reader page whose result rejects (main refused it) is the act\'s refusal, and the issue stays unread', async () => {
@@ -437,7 +438,7 @@ test('act open: the loader the person closed (annotate { opened: false }) leaves
     cancel: async () => ({ closed: false }),
     annotate: async (a) => (calls.push(a.key), answer),
   }
-  const b = boot({ reviewer })
+  const b = boot({ reviewer, project: ON })
   await b.h.pollNow('test')
   await b.h.S.classifying
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
@@ -456,6 +457,7 @@ test('act open: the loader the person closed (annotate { opened: false }) leaves
 test('our reader page closed before the issue reached it leaves the issue unread; one still open marks it read', async () => {
   let keepOpen = false
   const b = boot({
+    project: ON,
     mutate: (c) => {
       const start = c.overlay.start
       c.overlay.start = (spec) => (keepOpen ? { ...start(spec), result: new Promise(() => {}) } : start(spec))
@@ -471,6 +473,28 @@ test('our reader page closed before the issue reached it leaves the issue unread
   keepOpen = true
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
   for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
+  assert.equal(await readOf(b, 'ABC-1'), true)
+  await b.h.stop()
+})
+
+// Opening marks read only with markReadOnOpen (default off): Inbox's item keeps read: false, and no
+// item event after the open claims otherwise.
+test('act open with markReadOnOpen off (the default): the item stays unread and no event says read', async () => {
+  const calls = []
+  const reviewer = { annotate: async (a) => (calls.push(a.key), { opened: true }) }
+  const b = boot({ reviewer })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
+  const n = events(b).length
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  for (let i = 0; i < 100 && !calls.length; i++) await settle()
+  await settle()
+  assert.deepEqual(calls, ['jira:ABC-1'], 'the issue was shown')
+  assert.equal(await readOf(b, 'ABC-1'), false)
+  assert.ok(!events(b).slice(n).some((e) => e.event === 'item' && e.data.id === 'ABC-1' && e.data.read), 'no item event claims read')
+  // The explicit action still works.
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markRead']), { ok: true })
   assert.equal(await readOf(b, 'ABC-1'), true)
   await b.h.stop()
 })

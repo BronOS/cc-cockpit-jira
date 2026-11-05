@@ -26,6 +26,9 @@ test('a complete configuration with defaults', () => {
   assert.equal(r.cfg.rowsPerLane, 10)
   assert.equal(r.cfg.tokenKind, 'auto')
   assert.equal(r.cfg.triageText, 'full')
+  assert.equal(r.cfg.markReadOnOpen, false, 'opening an issue does not mark it read unless asked')
+  assert.equal(readSettings({ markReadOnOpen: true }).cfg.markReadOnOpen, true)
+  assert.equal(readSettings({ markReadOnOpen: 'yes' }).cfg.markReadOnOpen, false)
 })
 
 test('the site: https only, no path, no user info, a real URL', () => {

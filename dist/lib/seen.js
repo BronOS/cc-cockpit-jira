@@ -14,7 +14,7 @@
 //
 // Besides the marks, `flags`: issues the person marked unread themselves (Mark unread). A flag
 // makes an issue unread whatever its activity, so the button works on every issue, also one where
-// all activity is the person's own; opening it or Mark read clears it. Flags are the person's
+// all activity is the person's own; Mark read (or opening it, with markReadOnOpen) clears it. Flags are the person's
 // reminder only: triage still goes by the activity of others (lib/triage.js uses newCount).
 
 const MAX_MARKS = 3000
@@ -72,7 +72,8 @@ function seed(seen, entries, complete) {
 }
 
 /**
- * Seen = the newest activity at the moment the person opened it or pressed Mark read (all
+ * Seen = the newest activity at the moment the person pressed Mark read or opened it (only with the
+ * markReadOnOpen setting, off by default) (all
  * activity, so a later mention in a Mentioned issue is still new). An issue with no activity of
  * others keeps a mark of `now`, which nothing earlier can pass.
  */
@@ -84,7 +85,7 @@ function markRead(seen, issue, now = Date.now()) {
 }
 
 /**
- * Unread again, on any issue: a flag (unread until opened or marked read), and when others did
+ * Unread again, on any issue: a flag (unread until marked read, or opened with markReadOnOpen), and when others did
  * something, the mark just before their newest activity, so that shows as "new" again.
  */
 function markUnread(seen, issue, lane) {

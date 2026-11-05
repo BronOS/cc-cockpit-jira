@@ -74,6 +74,9 @@ function readSettings(p) {
   }
   const tokenKind = s.tokenKind === 'classic' || s.tokenKind === 'scoped' ? s.tokenKind : 'auto'
   const triageText = s.triageText === 'summary' ? 'summary' : 'full'
+  // Off unless set to exactly true: opening an issue used to mark it read, and people who open one
+  // to glance at it (from Inbox above all) lost the unread mark they kept as a to-do.
+  const markReadOnOpen = s.markReadOnOpen === true
   const cfg = {
     site: site.site || '',
     email,
@@ -87,6 +90,7 @@ function readSettings(p) {
     pollMinutes: int(s.pollMinutes, 3, 1, 1440),
     rowsPerLane: int(s.rowsPerLane, 10, 1, 300),
     triageText,
+    markReadOnOpen,
     mailSenders,
   }
   // Ready = enough to talk to Jira. A bad optional value (a project key) is reported but does

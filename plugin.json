@@ -74,6 +74,12 @@
             "maximum": 300,
             "default": 10
           },
+          "markReadOnOpen": {
+            "type": "boolean",
+            "title": "Mark an issue read when I open it",
+            "description": "Off: opening an issue (here or from Inbox) leaves it unread until you press Mark read. On: opening it marks it read.",
+            "default": false
+          },
           "onHoldStatuses": {
             "type": "array",
             "title": "On hold statuses",

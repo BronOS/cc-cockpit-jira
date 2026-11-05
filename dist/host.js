@@ -531,14 +531,21 @@ function start(ctx, io = {}) {
     const text = readableText(issue, { site, mark, lane }) + (stale ? `\n\n(${staleNote})` : '')
     const url = browseUrl(site, key)
     const title = `${key}: ${oneLine(issue.summary)}`
-    // Opening marks it read (design); the text and the HTML already have their new marks. Applied
+    // Opening marks it read only with the markReadOnOpen setting (off by default: an issue opened to
+    // glance at it, from Inbox above all, lost the unread mark the person kept as a to-do). This is
+    // the one place an open touches the seen marks (the panel row and the feed's act 'open' both come
+    // through showIssue; the overlay buttons have no open; the CLI cannot open), so with the setting
+    // off an open changes nothing: no saveSeen, no emitFeed, so Inbox never gets an item event with
+    // read: true for a mere open, and Mark unread's flag stays. Mark read / Mark unread (setRead)
+    // work either way. Read at show time: a settings change during the read counts.
+    // With the setting on: the text and the HTML already have their new marks. Applied
     // only once the issue is on screen (the same places shown() runs): marking it right after the
     // read left an issue seen, and pushed read: true to Inbox, for an open then refused or a loader
     // the person closed (annotate's { opened: false }) (phase-1 review round 4).
     // Never throws: it runs inside the annotate tries, where a throw would read as a reviewer refusal.
     const seen = async () => {
       shown()
-      if (!S.seen || !issue.full) return
+      if (!S.seen || !issue.full || !cfg().markReadOnOpen) return
       try {
         markRead(S.seen, issue, now())
         await saveSeen()
