@@ -24,6 +24,12 @@ function parseDue(value) {
   return typeof value === 'string' && /^\d{4}-\d\d-\d\d$/.test(value) ? Date.parse(value) || 0 : 0
 }
 
+/** The issue's labels as strings, at most 30 of 100 characters (they go into plain-text tags). */
+function jiraLabels(value) {
+  if (!Array.isArray(value)) return []
+  return value.filter((l) => typeof l === 'string' && l.trim()).map((l) => cut(l.trim(), 100)).slice(0, 30)
+}
+
 /** The header of an issue from a search's `fields` (also the start of a full read). */
 function header(key, f) {
   const status = (f && f.status) || {}
@@ -49,6 +55,8 @@ function header(key, f) {
     // The due date (a plain `2026-11-05`, read as that day's start in UTC), only when set; the feed
     // for Inbox shows it. Left out otherwise so a header without one keeps its shape.
     ...(parseDue(f.duedate) ? { dueAt: parseDue(f.duedate) } : {}),
+    // Jira's own labels, for the `label:<name>` tags of the inbox feed; left out when there are none.
+    ...(jiraLabels(f.labels).length ? { labels: jiraLabels(f.labels) } : {}),
   }
 }
 

@@ -21,7 +21,7 @@ const MAX_HISTORIES = 500
 const ISSUE_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,description,comment,project,attachment,labels,components,fixVersions,duedate,resolution,parent'
 
 // The search's header fields (jql.js SEARCH_FIELDS), for a single issue.
-const HEADER_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,project,duedate'
+const HEADER_FIELDS = 'summary,status,priority,issuetype,updated,created,assignee,reporter,project,duedate,labels'
 
 /**
  * @param {object} o

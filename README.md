@@ -159,15 +159,24 @@ app version this plugin runs on (tested against 0.9.2).
 
 ## Inbox
 
-The plugin also provides `inbox-feed` (v1) for the Inbox plugin, which lists the items of every
-source in one place. It offers the issues the panel's lanes show (read from the cache, never from
-Jira), best first by this plugin's own triage: the Jev verdict, or without one the rule the status
-and priority imply. Quiet issues (noise) are left out unless nothing else is there; at most 50 a
-call. An item carries the issue key, a `rev` (the issue's `updated`, so Inbox's "done until it
-changes" sees any comment or status change), "KEY summary", "assigned to you · High", the status,
-the due date when set, and whether it is unread here. A click in Inbox opens the issue view with
-the details column, as a row click does. There is no mark-read: opening an issue marks it read here.
-Needs nothing new from the app to provide; Inbox itself needs cc-cockpit 0.9.7.
+The plugin also provides `inbox-feed` (v2) for the Inbox plugin, which lists the items of every
+source in one place and sorts them with its own rules. The feed holds the issues of the Backlog,
+In progress, On hold and Mentioned lanes (read from the cache, never from Jira); an issue that
+reaches the Done lane, or a lane you switch off, leaves it. Nothing else is filtered: no noise rule,
+no count limit, and no triage level (the Jev verdicts stay in this plugin's lanes). Its scope line
+("my open issues + mentions of the last 7 days") follows your lane settings.
+
+Facts sit where Inbox's rules match them. The place is the project key and the status name. The
+labels are `assigned` (or `mentioned`), `priority:<name>`, `type:<name>`, `due:YYYY-MM-DD`, for an
+issue that is not yours `assignee:<name>` or `unassigned`, and your Jira labels as `label:<name>`.
+The `rev` is the issue's `updated`, so Inbox's "done until it changes" sees any comment or status
+change; marking read does not move it. The preview is the latest comment, else the start of the
+description. Actions: Open (the issue view with the details column, as a row click does) and Mark
+read / Mark unread (this plugin's own seen marks).
+
+The plugin tells Inbox what changed (`item`, `gone`, and a `sync` when its state changes: not set
+up, a refused token, an error, a recovery) after each poll, mark and settings change. Needs
+cc-cockpit 0.9.7 for Inbox to read it.
 
 ## CLI
 

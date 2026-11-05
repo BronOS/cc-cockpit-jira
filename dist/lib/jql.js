@@ -4,7 +4,7 @@
 // so no setting can widen a search (`ABC) OR (project is not EMPTY`).
 
 /** The fields every search asks for: enough for a lane, a row and the "did it change" test. */
-const SEARCH_FIELDS = ['summary', 'status', 'priority', 'issuetype', 'updated', 'assignee', 'reporter', 'project', 'duedate']
+const SEARCH_FIELDS = ['summary', 'status', 'priority', 'issuetype', 'updated', 'assignee', 'reporter', 'project', 'duedate', 'labels']
 const DONE_FIELDS = [...SEARCH_FIELDS, 'statuscategorychangedate', 'resolutiondate']
 
 const CAPS = { assigned: 500, done: 100, mentioned: 200 }

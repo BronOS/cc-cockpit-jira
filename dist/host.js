@@ -197,7 +197,7 @@ function start(ctx, io = {}) {
         S.polling = null
         postState()
         // After a failed poll too: the feed's state (signed out, error) changed.
-        feedChanged()
+        emitFeed()
       }
     })()
     postState()
@@ -300,6 +300,8 @@ function start(ctx, io = {}) {
     if (S.settings.ready) reschedule()
     rebuild()
     postState()
+    // A lane switched off or on, or the account gone: Inbox hears it now, not with the next poll.
+    emitFeed()
     if (S.settings.ready) void pollNow('settings')
   })
 
@@ -347,7 +349,7 @@ function start(ctx, io = {}) {
     await saveSeen()
     rebuild()
     postState()
-    feedChanged()
+    emitFeed()
     // Unread changes the hint, so the item's hash: only this issue is judged again.
     void classifyChanged()
   }
@@ -422,7 +424,7 @@ function start(ctx, io = {}) {
       await saveSeen()
       rebuild()
       postState()
-      feedChanged()
+      emitFeed()
       void classifyChanged()
     }
     // Two builds at most: the reviewer's (with the details column when it takes one) and our own
@@ -739,53 +741,103 @@ function start(ctx, io = {}) {
     })
   }
 
-  // ---- the inbox-feed service (v1; Inbox's contract, lib/feed.js) ----
+  // ---- the inbox-feed service (v2; Inbox's contract, lib/feed.js) ----
   //
   // Inbox (and any plugin that collects `inbox-feed`) reads the issues the panel shows. Answers come
-  // from the cache the panel draws from, never from Jira. No `markRead`: Jira's seen marks are the
-  // plugin's own, and opening an issue already sets them (features() says so).
+  // from the cache the panel draws from, never from Jira. Jira's seen marks are the plugin's own:
+  // markRead / markUnread go through `setRead`, the panel's own path.
 
-  /** Tells Inbox to read again; a missing emit (an older app) or a failing one never breaks a poll. */
-  function feedChanged() {
-    if (S.stopped || typeof ctx.services.emit !== 'function') return
+  const feedSt = { sent: new Map(), key: null, started: false } // what Inbox was last told: id -> item, and the Sync state it carried
+
+  /** The items of the scope (`limit`: the contract's 1000 by default). */
+  function feedList(limit) {
+    return feed.feedItems(allRows(S.view), { mentionedBy, since: now() - cfg().mentionDays * 86400000, limit })
+  }
+
+  /** `ok`, `signedOut` or `error`, with the message the Sync carries. */
+  function feedState() {
+    // Not set up: nothing was ever read. Jira refused the token (expired, revoked): the cached items
+    // still come, marked signed out.
+    if (!S.settings.ready) return { state: 'signedOut', message: feed.feedMessage(`Jira is not configured (${missingText(S.settings.missing).join(', ') || S.settings.problems.join('; ')})`) }
+    if (S.error && S.errorKind === 'auth') return { state: 'signedOut', message: feed.feedMessage(S.error) }
+    if (S.error) return { state: 'error', message: feed.feedMessage(S.error) }
+    return { state: 'ok' }
+  }
+
+  /** The state as one comparable string: a change of kind or of message is news to Inbox's source line. */
+  const stateKey = (st) => `${st.state}|${st.message || ''}`
+
+  /** The Sync: the whole list from the cache, and the baseline the next diff starts from. */
+  function feedSync() {
+    const items = feedList()
+    const st = feedState()
+    feedSt.sent = new Map(items.map((i) => [i.id, i]))
+    feedSt.key = stateKey(st)
+    return { items, ...st, asOf: S.lastPoll || now() }
+  }
+
+  function feedEmit(event, data) {
     try {
-      ctx.services.emit('inbox-feed', 'changed', {})
+      ctx.services.emit('inbox-feed', event, data)
     } catch (e) {
-      ctx.log.warn('inbox-feed changed:', e && e.message ? e.message : String(e))
+      ctx.log.warn(`inbox-feed ${event}:`, e && e.message ? e.message : String(e))
     }
   }
 
-  async function feedItems(o) {
-    const { limit } = feed.itemsOptions(o)
-    await ready
-    const items = feed.buildItems(allRows(S.view), { limit, mentionedBy })
-    const asOf = S.lastPoll || now()
-    if (!S.settings.ready) return { items, asOf, state: 'signedOut', message: feed.feedMessage(`Jira is not configured (${missingText(S.settings.missing).join(', ') || S.settings.problems.join('; ')})`) }
-    // Jira refused the token (expired, revoked): the cached items still come, marked signed out.
-    if (S.error && S.errorKind === 'auth') return { items, asOf, state: 'signedOut', message: feed.feedMessage(S.error) }
-    if (S.error) return { items, asOf, state: 'error', message: feed.feedMessage(S.error) }
-    return { items, asOf, state: 'ok' }
+  /**
+   * Tell Inbox what changed since it was last told (after a poll, a mark, a settings change): `item`
+   * per new or changed issue, `gone` for the missing ones (a Done issue, a lane switched off). A change
+   * of the Sync state (kind or message: not set up, a refused token, an error, a recovery) is a `sync`
+   * instead: the source is unsure it told everything. Nothing before the first sync (activate's cached
+   * view). Never throws: a missing emit (an older app) or a failing one never breaks a poll.
+   */
+  function emitFeed() {
+    if (S.stopped || !feedSt.started || typeof ctx.services.emit !== 'function') return
+    try {
+      if (stateKey(feedState()) !== feedSt.key) return feedEmit('sync', feedSync())
+      const next = feedList()
+      const d = feed.diffFeed(feedSt.sent, next)
+      feedSt.sent = new Map(next.map((i) => [i.id, i]))
+      for (const it of d.items) feedEmit('item', it)
+      for (const ids of feed.goneChunks(d.gone)) feedEmit('gone', { ids })
+    } catch (e) {
+      ctx.log.warn('inbox-feed:', e && e.message ? e.message : String(e))
+    }
   }
 
-  async function feedOpen(rawKey) {
-    const key = svc.checkKey(rawKey)
+  void ready.then(() => {
+    if (S.stopped || typeof ctx.services.emit !== 'function') return
+    feedSt.started = true
+    feedEmit('sync', feedSync())
+  })
+
+  async function feedAct(id, action) {
     await ready
-    // Only an issue the feed lists: this call opens an overlay, so another plugin cannot use it to
-    // open any key (the jira service's document() is the call for that, with its limits).
-    if (!rowOf(key)) throw new Error(`jira: ${key} is not in the lanes`)
+    const refuse = (message) => ({ ok: false, message: feed.feedMessage(message) })
+    if (typeof id !== 'string' || typeof action !== 'string') return refuse('jira: act takes an item id and an action id')
+    // Only an issue the feed lists with that action: the caller is another plugin, and this call can
+    // open an overlay (the jira service's document() is the call for any key, with its limits).
+    const item = feedList(Infinity).find((i) => i.id === id)
+    if (!item) return refuse(`jira: ${cut(oneLine(id), 60)} is not in the lanes`)
+    if (!item.actions.some((a) => a.id === action)) return refuse(`jira: ${id} has no action "${action.slice(0, 40)}"`)
     try {
-      await openIssue(key)
+      if (action === 'open') await openIssue(id)
+      else await setRead(id, action === 'markRead')
+      return { ok: true }
     } catch (e) {
-      throw svc.serviceError(e)
+      return refuse(`jira: ${e && e.message ? e.message : e}`)
     }
   }
 
   if (typeof ctx.services.provide === 'function') {
     ctx.services.provide('inbox-feed', {
-      describe: () => ({ ...feed.DESCRIBE }),
-      features: () => [],
-      items: (o) => feedItems(o),
-      open: (id) => feedOpen(id),
+      describe: () => ({ ...feed.DESCRIBE, scope: feed.scopeLine(cfg()) }),
+      features: () => [...feed.FEATURES],
+      async snapshot() {
+        await ready
+        return feedSync()
+      },
+      act: (id, action) => feedAct(id, action),
     })
   }
 

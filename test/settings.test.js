@@ -67,7 +67,7 @@ test('the manifest schema follows the app\'s rules: no regex, a top-level secret
   assert.ok(!('default' in token))
   assert.deepEqual(Object.keys(token).sort(), ['description', 'format', 'title', 'type'])
   for (const [k, p] of Object.entries(schema.properties)) if (p.oneOf) assert.ok('default' in p, `${k} has a default`)
-  assert.deepEqual(manifest.services, { provides: { jira: 1, 'inbox-feed': 1 }, uses: { triage: 1, reviewer: 1 } })
+  assert.deepEqual(manifest.services, { provides: { jira: 1, 'inbox-feed': 2 }, uses: { triage: 1, reviewer: 1 } })
   assert.ok(!manifest.contributes.cli[0].stdin, 'no stdin: it would apply to every subcommand')
 })
 

@@ -150,7 +150,11 @@ function current(cache, h) {
   const c = cache.issues[h.key]
   if (!c) return { ...h, events: [], description: '', full: false }
   const { updated, ...fresh } = h
-  return { ...c, ...fresh, updated: c.updated }
+  const out = { ...c, ...fresh, updated: c.updated }
+  // A header without labels or a due date means the issue has none now; the cached copy's must not stay.
+  if (!fresh.labels) delete out.labels
+  if (!fresh.dueAt) delete out.dueAt
+  return out
 }
 
 /**
