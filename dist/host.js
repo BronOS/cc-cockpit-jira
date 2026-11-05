@@ -34,6 +34,11 @@ const ROWS_PER_LANE = 300 // the panel message stays far below the 1 MiB post li
 const CLI_WAIT_MS = 25000 // `ccc` gives a handler 30 s
 // How long the reviewer's prepare and cancel may take: host-local calls, far under this.
 const REVIEWER_WAIT_MS = 2000
+// ctx.overlay.start gives no "shown" signal: main's refusal (3 open, 10 a minute) rejects the handle's
+// `result` within one host-to-main round trip, while an overlay that opened settles only when it
+// closes. Our reader page counts as up once this long passed without a rejection (the bundled
+// reviewer's prepare and annotate wait the same).
+const OVERLAY_SETTLE_MS = 500
 const IMAGE_TIMEOUT_MS = 20000 // one attachment download, redirects and body included
 // The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON
 // (`ccc guide panels`), and JSON can double a string (quotes, backslashes).
@@ -384,7 +389,9 @@ function start(ctx, io = {}) {
     // Without the reviewer our own reader page is the overlay, so it is up before the issue is read
     // (`ready: 'manual'`: its loader stays until the page has drawn the issue).
     const early = pre || annotateOn() ? null : startReader(key)
-    if (pre || early) shown()
+    // Our page counts once main did not refuse it (a refused one fails the open in plainReader).
+    if (pre) shown()
+    else if (early) void early.refusal.then((e) => e || shown())
     try {
       await showIssue(key, pre, early, shown)
     } finally {
@@ -442,6 +449,13 @@ function start(ctx, io = {}) {
     ctx.overlay.buttons('inbox-item', (info) => overlayButtons(info))
   }
 
+  /** Resolves null once an overlay is up (no refusal within OVERLAY_SETTLE_MS, or it already ended), else main's refusal. */
+  function overlayRefusal(handle) {
+    let timer
+    const wait = new Promise((resolve) => (timer = setTimeout(resolve, OVERLAY_SETTLE_MS, null)))
+    return Promise.race([handle.result.then(() => null, (e) => e || new Error('refused')), wait]).finally(() => clearTimeout(timer))
+  }
+
   /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
   function within(p, ms) {
     let timer
@@ -481,15 +495,26 @@ function start(ctx, io = {}) {
     const text = readableText(issue, { site, mark, lane }) + (stale ? `\n\n(${staleNote})` : '')
     const url = browseUrl(site, key)
     const title = `${key}: ${oneLine(issue.summary)}`
-    // Opening marks it read (design); the text and the HTML already have their new marks.
-    if (S.seen && issue.full) {
-      markRead(S.seen, issue, now())
-      await saveSeen()
-      rebuild()
-      postState()
-      emitFeed()
-      void classifyChanged()
+    // Opening marks it read (design); the text and the HTML already have their new marks. Applied
+    // only once the issue is on screen (the same places shown() runs): marking it right after the
+    // read left an issue seen, and pushed read: true to Inbox, for an open then refused or a loader
+    // the person closed (annotate's { opened: false }) (phase-1 review round 4).
+    // Never throws: it runs inside the annotate tries, where a throw would read as a reviewer refusal.
+    const seen = async () => {
+      shown()
+      if (!S.seen || !issue.full) return
+      try {
+        markRead(S.seen, issue, now())
+        await saveSeen()
+        rebuild()
+        postState()
+        emitFeed()
+        void classifyChanged()
+      } catch (e) {
+        ctx.log.warn(`marking ${key} seen: ${e && e.message ? e.message : e}`)
+      }
     }
+    const opened = (r) => !(r && r.opened === false)
     // Two builds at most: the reviewer's (with the details column when it takes one) and our own
     // reader page's (no column: the facts stay in the header card there).
     const docs = {}
@@ -504,8 +529,9 @@ function start(ctx, io = {}) {
         // options it takes, so the app's ctx.openExternal (the same release) stands in for that.
         const v = await view(typeof ctx.openExternal === 'function')
         try {
-          await reviewer.annotate({ ...base, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
-          return shown()
+          const r = await reviewer.annotate({ ...base, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
+          if (opened(r)) await seen()
+          return
         } catch (e) {
           if (isMissingAnnotate(e)) {
             noAnnotate()
@@ -517,13 +543,14 @@ function start(ctx, io = {}) {
       }
       if (!S.annotateMissing) {
         try {
-          await reviewer.annotate({ ...base, text })
+          const r = await reviewer.annotate({ ...base, text })
           if (htmlError) {
             S.htmlRejected = htmlError
             ctx.log.info('reviewer.annotate takes text only (cc-cockpit before 0.8.0 html mode): using text for this run')
             postState()
           }
-          return shown()
+          if (opened(r)) await seen()
+          return
         } catch (e) {
           if (!isMissingAnnotate(e)) {
             setNotice(`The reviewer could not open ${key}: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
@@ -535,7 +562,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(issue, await view(), url, early, shown)
+    await plainReader(issue, await view(), url, early, shown, seen)
   }
 
   // cc-cockpit before 0.8.0: no annotate. Remember it for this run and use our own page.
@@ -585,7 +612,12 @@ function start(ctx, io = {}) {
     try {
       const handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: summary ? `${key}: ${cut(oneLine(summary), 80)}` : key, size: 'large', ready: 'manual', type: overlayType(key) })
       if (typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(key))
-      return { handle, used: false }
+      // `refusal`: null once the page is up (OVERLAY_SETTLE_MS without a rejection, or the person
+      // closed it), else main's refusal; `ended` turns true once the overlay ended.
+      const started = { handle, used: false, ended: false, refusal: overlayRefusal(handle) }
+      const end = () => (started.ended = true)
+      handle.result.then(end, end)
+      return started
     } catch (e) {
       setNotice(`Cannot open the reader: ${e.message}`, 'error')
       return null
@@ -597,27 +629,35 @@ function start(ctx, io = {}) {
    * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
    * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
    */
-  async function plainReader(issue, view, url, early, shown = () => {}) {
+  async function plainReader(issue, view, url, early, shown = () => {}, seen = shown) {
     const started = early || startReader(issue.key, issue)
     if (!started) return
     started.used = true
+    // start() returns a handle even for an overlay main refuses; the refusal only rejects `result`.
+    const refused = await started.refusal
+    if (refused) return setNotice(`Cannot open the reader: ${refused.message}`, 'error')
     // On screen now; the wait below lasts until the person closes the page (feed act answers here).
     shown()
     const handle = started.handle
     const parts = []
     for (let i = 0; i < view.html.length; i += PAGE_HTML_PART) parts.push(view.html.slice(i, i + PAGE_HTML_PART))
+    let posted = false
     try {
       // With the app's overlay toolbar (Discuss with Claude, New session) the page drops its own two buttons.
       const toolbar = typeof ctx.overlay.buttons === 'function' && typeof handle.onDiscuss === 'function'
       handle.post({ type: 'doc', key: issue.key, summary: issue.summary, url, parts: parts.length, assets: view.assets.length, ...(toolbar ? { toolbar: true } : {}) })
       parts.forEach((part, i) => handle.post({ type: 'html', i, part }))
       for (const a of view.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
+      posted = true
     } catch (e) {
       ctx.log.warn(`posting ${issue.key} to the reader: ${e.message}`)
       // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
       setNotice(`Cannot show ${issue.key}: ${e.message}`, 'error')
       try { handle.close() } catch {}
     }
+    // Seen only when the issue reached a page still open: a post after the person closed the loader
+    // is a silent no-op, so they never saw it.
+    if (posted && !started.ended) await seen()
     handle.onMessage((m) => {
       if (m && typeof m.open === 'string') void openUrl(m.open).catch((e) => setNotice(e.message, 'error'))
     })

@@ -263,7 +263,8 @@ test('Open on an app without annotate: our own page gets the same HTML and the i
   const { ctx, h } = boot({ reviewer, jira: attJira(), overlayWait: true })
   await h.pollNow('test')
   const opening = ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  for (let i = 0; i < 50 && !ctx.overlays.length; i++) await new Promise((r) => setTimeout(r, 5))
+  // The issue is posted once the page counts as up (no refusal within OVERLAY_SETTLE_MS).
+  for (let i = 0; i < 300 && !(ctx.overlays.length && ctx.overlays[0].posts.length); i++) await new Promise((r) => setTimeout(r, 5))
   const o = ctx.overlays[0]
   assert.equal(o.spec.file, 'panels/issue.html')
   const head = o.posts[0]

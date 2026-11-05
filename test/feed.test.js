@@ -402,6 +402,79 @@ test('act open: the app refusing our reader page is the act\'s refusal, with the
   await h.stop()
 })
 
+// Round-4 review: main never throws from start(); its refusal (3 open, 10 a minute) rejects the
+// handle's result a moment later, and act answered ok for a reader page that never opened. And the
+// issue was marked seen (read: true to Inbox) right after the read, before anything was shown.
+const readOf = async (b, key) => (await b.ctx.callService('inbox-feed', 'snapshot')).items.find((i) => i.id === key).read
+
+test('act open: a reader page whose result rejects (main refused it) is the act\'s refusal, and the issue stays unread', async () => {
+  const b = boot({
+    mutate: (c) => {
+      const start = c.overlay.start
+      c.overlay.start = (spec) => {
+        const h = start(spec)
+        const result = Promise.reject(new Error('overlay: bronos.jira already has 3 overlays open'))
+        result.catch(() => {})
+        return { ...h, result }
+      }
+    },
+  })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
+  const r = await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^jira: Cannot open the reader: overlay: bronos\.jira already has 3 overlays open/)
+  assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
+  await b.h.stop()
+})
+
+test('act open: the loader the person closed (annotate { opened: false }) leaves the issue unread; a shown one marks it read', async () => {
+  let answer = { opened: false }
+  const calls = []
+  const reviewer = {
+    prepare: async () => ({ opened: true }),
+    cancel: async () => ({ closed: false }),
+    annotate: async (a) => (calls.push(a.key), answer),
+  }
+  const b = boot({ reviewer })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
+  // The prepared loader was up, so act answers ok; the person closed it while the issue loaded.
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  for (let i = 0; i < 100 && !calls.length; i++) await settle()
+  await settle()
+  assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
+  answer = { opened: true }
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
+  assert.equal(await readOf(b, 'ABC-1'), true)
+  await b.h.stop()
+})
+
+test('our reader page closed before the issue reached it leaves the issue unread; one still open marks it read', async () => {
+  let keepOpen = false
+  const b = boot({
+    mutate: (c) => {
+      const start = c.overlay.start
+      c.overlay.start = (spec) => (keepOpen ? { ...start(spec), result: new Promise(() => {}) } : start(spec))
+    },
+  })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
+  // The fake page ends at once (dismissed): the person closed the loader during the read.
+  await b.ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.ok(b.ctx.overlays.length >= 1)
+  assert.equal(await readOf(b, 'ABC-1'), false)
+  keepOpen = true
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
+  assert.equal(await readOf(b, 'ABC-1'), true)
+  await b.h.stop()
+})
+
 test('act markUnread then markRead: the plugin\'s seen marks, the item follows', async () => {
   const b = boot()
   await b.h.pollNow('test')
