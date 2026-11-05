@@ -310,7 +310,8 @@ test('act open: a listed key opens its issue view, as a row click does', async (
   await h.pollNow('test')
   await h.S.classifying
   assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  assert.equal(calls.length, 1)
+  // act answers once the open has started: the read and the annotate go on after it.
+  await until(() => calls.length === 1)
   assert.equal(calls[0].key, 'jira:ABC-1')
   await h.stop()
 })
@@ -516,4 +517,26 @@ test('the manifest provides jira 1 and inbox-feed 2 at 0.7.0', () => {
   const m = require('../plugin.json')
   assert.equal(m.version, '0.7.0')
   assert.deepEqual(m.services.provides, { jira: 1, 'inbox-feed': 2 })
+})
+
+async function until(fn, ms = 2000) {
+  const end = Date.now() + ms
+  while (!fn()) {
+    if (Date.now() > end) throw new Error('timed out waiting')
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+test('act open settles once the reader is up, not when the person closes it', async () => {
+  const { ctx, h } = boot()
+  await h.pollNow('test')
+  await h.S.classifying
+  // Our own reader page stays open (its result never settles), as it does until the person closes it.
+  const start = ctx.overlay.start
+  ctx.overlay.start = (spec) => ({ ...start(spec), result: new Promise(() => {}) })
+  const before = ctx.overlays.length
+  const late = new Promise((r) => setTimeout(() => r('late'), 1000))
+  assert.deepEqual(await Promise.race([ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), late]), { ok: true })
+  assert.ok(ctx.overlays.length > before)
+  await h.stop()
 })

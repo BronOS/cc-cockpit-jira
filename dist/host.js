@@ -372,11 +372,12 @@ function start(ctx, io = {}) {
    * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
    * read, our own reader page) closes it in the finally.
    */
-  async function openIssue(key) {
+  async function openIssue(key, onStarted) {
     const pre = await prepareView(key)
     // Without the reviewer our own reader page is the overlay, so it is up before the issue is read
     // (`ready: 'manual'`: its loader stays until the page has drawn the issue).
     const early = pre || annotateOn() ? null : startReader(key)
+    if (onStarted) onStarted()
     try {
       await showIssue(key, pre, early)
     } finally {
@@ -887,6 +888,29 @@ function start(ctx, io = {}) {
     feedEmit('sync', feedSync())
   })
 
+  /**
+   * `act(id, 'open')` of the feed: resolves once the open has started (the reviewer's overlay
+   * prepared, or our own reader page up), not when it is over. The rest (reading the issue, the
+   * annotate, and without the reviewer the wait for our reader page to close) runs on: Inbox gives
+   * every act 10 s, and an open that waited for all that was reported as failed while it was on
+   * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
+   * after the start goes to this panel's notice; one before it is the act's refusal.
+   */
+  function openStarted(open) {
+    return new Promise((resolve, reject) => {
+      let started = false
+      open(() => {
+        started = true
+        resolve()
+      }).then(resolve, (e) => {
+        if (!started) return reject(e)
+        const msg = e && e.message ? e.message : String(e)
+        ctx.log.warn(`open: ${msg}`)
+        setNotice(`Could not open the issue: ${msg}`, 'error')
+      })
+    })
+  }
+
   async function feedAct(id, action) {
     await ready
     const refuse = (message) => ({ ok: false, message: feed.feedMessage(message) })
@@ -897,7 +921,7 @@ function start(ctx, io = {}) {
     if (!item) return refuse(`jira: ${cut(oneLine(id), 60)} is not in the lanes`)
     if (!item.actions.some((a) => a.id === action)) return refuse(`jira: ${id} has no action "${action.slice(0, 40)}"`)
     try {
-      if (action === 'open') await openIssue(id)
+      if (action === 'open') await openStarted((started) => openIssue(id, started))
       else await setRead(id, action === 'markRead')
       return { ok: true }
     } catch (e) {
