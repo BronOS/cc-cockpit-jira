@@ -364,6 +364,13 @@ function start(ctx, io = {}) {
     postState()
   }
 
+  /** Close an overlay handle that is not needed; a throw here must not mask the error it runs beside. */
+  function closeQuietly(handle) {
+    try {
+      handle.close()
+    } catch {}
+  }
+
   /**
    * Open: the issue as styled HTML with its images in the reviewer (cc-cockpit 0.8.0), else as
    * plain text in the reviewer (a reviewer whose annotate takes text only), else in our own page.
@@ -396,9 +403,7 @@ function start(ctx, io = {}) {
       await showIssue(key, pre, early, shown)
     } finally {
       if (pre) await cancelView(pre)
-      if (early && !early.used) {
-        try { early.handle.close() } catch {}
-      }
+      if (early && !early.used) closeQuietly(early.handle)
     }
   }
 
@@ -415,7 +420,7 @@ function start(ctx, io = {}) {
   function ownItem(info) {
     const d = info && info.type && info.type.data
     if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
-    return feedList(Infinity).find((i) => i.id === d.id) || null
+    return feedItemOf(d.id)
   }
 
   /**
@@ -438,7 +443,7 @@ function start(ctx, io = {}) {
 
   /** What Discuss with Claude sends for an issue overlay: key and summary, status and the latest comment, capped. */
   function overlayDiscuss(key) {
-    const item = feedList(Infinity).find((i) => i.id === key)
+    const item = feedItemOf(key)
     if (!item) return null
     const status = item.place && item.place.status ? item.place.status : ''
     return { text: cut([`Jira issue: ${item.title}`, status ? `Status: ${status}` : '', item.preview ? `Latest: ${item.preview}` : ''].filter(Boolean).join('\n'), 4000) }
@@ -653,7 +658,7 @@ function start(ctx, io = {}) {
       ctx.log.warn(`posting ${issue.key} to the reader: ${e.message}`)
       // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
       setNotice(`Cannot show ${issue.key}: ${e.message}`, 'error')
-      try { handle.close() } catch {}
+      closeQuietly(handle)
     }
     // Seen only when the issue reached a page still open: a post after the person closed the loader
     // is a silent no-op, so they never saw it.
@@ -875,9 +880,17 @@ function start(ctx, io = {}) {
 
   const feedSt = { sent: new Map(), key: null, started: false } // what Inbox was last told: id -> item, and the Sync state it carried
 
-  /** The items of the scope (`limit`: the contract's 1000 by default). */
-  function feedList(limit) {
-    return feed.feedItems(allRows(S.view), { mentionedBy, since: now() - cfg().mentionDays * 86400000, limit })
+  /** The items of the scope (`limit`: the contract's 1000 by default; `only`: just that id). */
+  function feedList(limit, only) {
+    return feed.feedItems(allRows(S.view), { mentionedBy, since: now() - cfg().mentionDays * 86400000, limit, only })
+  }
+
+  /**
+   * One feed item by id, or null: the item feedList(Infinity) holds, without building and sorting
+   * every other one (main asks the overlay buttons after every click and setButtons).
+   */
+  function feedItemOf(id) {
+    return feedList(Infinity, id)[0] || null
   }
 
   /** `ok`, `signedOut` or `error`, with the message the Sync carries. */
@@ -977,7 +990,7 @@ function start(ctx, io = {}) {
     if (typeof id !== 'string' || typeof action !== 'string') return refuse('jira: act takes an item id and an action id')
     // Only an issue the feed lists with that action: the caller is another plugin, and this call can
     // open an overlay (the jira service's document() is the call for any key, with its limits).
-    const item = feedList(Infinity).find((i) => i.id === id)
+    const item = feedItemOf(id)
     if (!item) return refuse(`jira: ${cut(oneLine(id), 60)} is not in the lanes`)
     if (!item.actions.some((a) => a.id === action)) return refuse(`jira: ${id} has no action "${action.slice(0, 40)}"`)
     try {

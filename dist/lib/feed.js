@@ -124,8 +124,9 @@ function issueItem(row, o = {}) {
 /**
  * The whole scope as items, newest first (then the id, a stable order), at most `limit`
  * (default 1000, the contract's cap; `act` passes Infinity to check an id against everything).
+ * `only` builds just that id's item (a lookup, not a list: no other issue is built or sorted).
  * @param {object[]} rows poll.allRows(view)
- * @param {{ mentionedBy?: (issue: object) => string, since?: number, limit?: number }} [o]
+ * @param {{ mentionedBy?: (issue: object) => string, since?: number, limit?: number, only?: string }} [o]
  */
 function feedItems(rows, o = {}) {
   const byId = new Map()
@@ -133,6 +134,7 @@ function feedItems(rows, o = {}) {
     // The Done lane is out of the scope; an issue can sit in two lanes only through a stale cache,
     // and the feed id is the key, so once.
     if (!r || !r.issue || !r.issue.key || r.lane === 'done' || byId.has(r.issue.key)) continue
+    if (o.only !== undefined && r.issue.key !== o.only) continue
     byId.set(r.issue.key, issueItem(r, o))
   }
   const limit = o.limit === undefined ? MAX_ITEMS : o.limit
