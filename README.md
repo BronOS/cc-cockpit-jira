@@ -176,7 +176,8 @@ read / Mark unread (this plugin's own seen marks).
 
 The plugin tells Inbox what changed (`item`, `gone`, and a `sync` when its state changes: not set
 up, a refused token, an error, a recovery) after each poll, mark and settings change. Needs
-cc-cockpit 0.9.7 for Inbox to read it.
+cc-cockpit 0.10.0 for Inbox 0.2.0 to read it; the toolbar buttons below need an app with `ctx.overlay.buttons`
+(0.10).
 
 **Issue overlays.** An issue opens with the overlay type `inbox-item { source: "bronos.jira", id }`
 (the reviewer gets it in `prepare` and `annotate`; without the reviewer our own reader page starts at
