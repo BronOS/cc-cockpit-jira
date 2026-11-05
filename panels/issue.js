@@ -36,20 +36,32 @@ function showAsset(id) {
   for (const img of document.querySelectorAll('img[data-asset]')) if (img.dataset.asset === id) img.src = url
 }
 
+// ready: 'manual' on the overlay: the app's loader stays until the page says it has drawn, so it
+// is told once, after the first render put the issue in the DOM (not at load: the loader would go
+// before the doc and html messages, leaving an empty page meanwhile).
+let drawn = false
+
 function render() {
   const t = document.createElement('template')
   t.innerHTML = parts.join('')
   clean(t.content)
   document.getElementById('doc').replaceChildren(t.content)
   for (const id of assets.keys()) showAsset(id)
+  if (!drawn) {
+    drawn = true
+    if (typeof ccPanel.ready === 'function') ccPanel.ready()
+  }
 }
 
 ccPanel.onMessage((m) => {
   if (!m || typeof m !== 'object') return
   if (m.type === 'doc') {
     doc = m
-    parts = new Array(Math.max(0, Number(m.parts) || 0))
+    // Filled, not sparse: every() skips holes, so a sparse array drew (and said ready) after part 0.
+    parts = new Array(Math.max(0, Number(m.parts) || 0)).fill(null)
     document.title = `${m.key}: ${m.summary}`
+    // The app's toolbar has Discuss with Claude and New session: the page's own two are dropped.
+    if (m.toolbar === true) for (const id of ['discuss', 'new']) document.getElementById(id).hidden = true
     if (!parts.length) render()
   } else if (m.type === 'html' && doc && Number.isInteger(m.i) && m.i >= 0 && m.i < parts.length && typeof m.part === 'string') {
     parts[m.i] = m.part

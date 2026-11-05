@@ -114,6 +114,7 @@ function fakeCtx(opts = {}) {
     opened: [],
     execs: [],
     overlays: [],
+    buttonProviders: [],
     schedules: [],
     sessionList: opts.sessions || [],
     onSettingsChange(fn) {
@@ -179,7 +180,10 @@ function fakeCtx(opts = {}) {
             o.posts.push(structuredClone(m))
           },
           onMessage: (fn) => (o.listeners.push(fn), () => {}),
-          close() {},
+          onDiscuss: (fn) => ((o.discuss = fn), () => {}),
+          close() {
+            o.closed = true
+          },
           focus() {},
         }
       },
@@ -255,6 +259,8 @@ function fakeCtx(opts = {}) {
       return [...ctx.posts].reverse().find((m) => m.type === 'state')
     },
   }
+  // `opts.buttons`: an app with ctx.overlay.buttons (the inbox redesign); without it, as before.
+  if (opts.buttons) ctx.overlay.buttons = (name, provider) => (ctx.buttonProviders.push({ name, provider }), () => {})
   return ctx
 }
 

@@ -8,7 +8,7 @@ const { fakeJira, fakeCtx, fakeTriage, fixture, picture, SITE, MEDIA, NOW, CONFI
 
 function boot(opts = {}) {
   const jira = fakeJira(opts.jira)
-  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer, sessions: opts.sessions, overlayAnswer: opts.overlayAnswer, overlayWait: opts.overlayWait })
+  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer, sessions: opts.sessions, overlayAnswer: opts.overlayAnswer, overlayWait: opts.overlayWait, buttons: !opts.noButtons })
   if (opts.header) Object.assign(ctx.panels, opts.header)
   const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs })
   return { jira, ctx, h, triage: ctx.services && opts.triage === undefined ? null : opts.triage }
@@ -180,7 +180,7 @@ test('Open with a reviewer that has prepare: the overlay is up before the issue 
   reads = () => jira.calls.filter((x) => /\/issue\/ABC-1|attachment/.test(x.url)).length
   const before = reads()
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.deepEqual(order[0], ['prepare', { key: 'jira:ABC-1', title: 'ABC-1: Checkout fails for EU cards' }, before])
+  assert.deepEqual(order[0], ['prepare', { key: 'jira:ABC-1', title: 'ABC-1: Checkout fails for EU cards', type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } } }, before])
   assert.ok(reads() > before, 'the open read the issue, after prepare')
   assert.deepEqual(order.slice(1), [['annotate', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
   await h.stop()
@@ -517,5 +517,128 @@ test('without ctx.openExternal (0.9.0 and older) no aside is sent and the facts 
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
   assert.equal(calls[0].aside, undefined)
   assert.match(calls[0].html, /<dl class="facts">/)
+  await h.stop()
+})
+
+// ---- overlay type, buttons, early reader (inbox redesign, task 24) ----
+
+const ITEM = (id, source = 'bronos.jira') => ({ type: { name: 'inbox-item', data: { source, id } }, title: 't', opener: 'bronos.jira' })
+
+test('issue overlays: the reader page starts at once with the inbox-item type and ready manual, before the issue is read', async () => {
+  const { ctx, h, jira } = boot({ reviewer: null })
+  await h.pollNow('test')
+  const reads = () => jira.calls.filter((x) => /\/issue\/ABC-1/.test(x.url)).length
+  const before = reads()
+  const start = ctx.overlay.start
+  let readsAtStart = -1
+  ctx.overlay.start = (spec) => ((readsAtStart = reads() - before), start(spec))
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(readsAtStart, 0, 'the overlay was asked for before the issue was read')
+  const o = ctx.overlays[0]
+  assert.equal(o.spec.ready, 'manual')
+  assert.deepEqual(o.spec.type, { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } })
+  assert.equal(o.spec.title, 'ABC-1: Checkout fails for EU cards')
+  const doc = o.posts.find((p) => p.type === 'doc')
+  assert.equal(doc.toolbar, true, 'with the app toolbar the page drops its Discuss and New session')
+  const text = o.discuss().text
+  assert.match(text, /^Jira issue: ABC-1 Checkout fails for EU cards\nStatus: /)
+  assert.ok(text.length <= 4000)
+  await h.stop()
+})
+
+test('issue overlays: an older app (no ctx.overlay.buttons) keeps the page buttons and still opens', async () => {
+  const { ctx, h } = boot({ reviewer: null, noButtons: true })
+  await h.pollNow('test')
+  assert.equal(ctx.buttonProviders.length, 0)
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(ctx.overlays.length, 1)
+  assert.equal(ctx.overlays[0].posts.find((p) => p.type === 'doc').toolbar, undefined)
+  await h.stop()
+})
+
+test('issue overlays: the early overlay closes when the issue cannot be read, with the error shown', async () => {
+  const { ctx, h } = boot({ reviewer: null, jira: { fail: { 'ABC-1': 500 } } })
+  await h.pollNow('test')
+  // Nothing cached to fall back on for this key's full read: drop the cached copy.
+  h.S.cache.issues['ABC-1'] = undefined
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(ctx.overlays.length, 1)
+  assert.equal(ctx.overlays[0].closed, true, 'the manual-ready loader does not stay')
+  assert.equal(ctx.lastState().notice.kind, 'error')
+  await h.stop()
+})
+
+test('issue overlays: a failed post to the reader shows an error and closes the loader', async () => {
+  const { ctx, h } = boot({ reviewer: null })
+  await h.pollNow('test')
+  const start = ctx.overlay.start
+  ctx.overlay.start = (spec) => {
+    const handle = start(spec)
+    return { ...handle, post: () => { throw new Error('message too big') } }
+  }
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(ctx.overlays[0].closed, true)
+  assert.match(ctx.lastState().notice.text, /Cannot show ABC-1: message too big/)
+  assert.equal(ctx.lastState().notice.kind, 'error')
+  await h.stop()
+})
+
+test('issue overlays: the reviewer gets the type in prepare and annotate', async () => {
+  const seen = []
+  const reviewer = {
+    prepare: async (s) => (seen.push(['prepare', s.type]), { opened: true }),
+    cancel: async () => ({ closed: false }),
+    annotate: async (s) => (seen.push(['annotate', s.type]), { opened: true }),
+  }
+  const { ctx, h } = boot({ reviewer })
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  const type = { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } }
+  assert.deepEqual(seen, [['prepare', type], ['annotate', type]])
+  assert.equal(ctx.overlays.length, 0, 'the reviewer path starts no page of ours')
+  await h.stop()
+})
+
+test('overlay buttons: only for our own items, labels follow state, run = act', async () => {
+  const { ctx, h } = boot()
+  await h.pollNow('test')
+  assert.equal(ctx.buttonProviders.length, 1)
+  assert.equal(ctx.buttonProviders[0].name, 'inbox-item')
+  const provider = ctx.buttonProviders[0].provider
+  assert.deepEqual(await provider(ITEM('ABC-1', 'bronos.gmail')), [])
+  assert.deepEqual(await provider(ITEM('NOPE-1')), [])
+  assert.deepEqual(await provider({ type: { name: 'inbox-item', data: null }, title: 't', opener: 'x' }), [])
+  const before = await provider(ITEM('ABC-1'))
+  assert.equal(before.length, 1)
+  assert.ok(!before.some((b) => b.id === 'open'))
+  assert.match(before[0].label, /read/i)
+  await before[0].run(ITEM('ABC-1'))
+  const after = await provider(ITEM('ABC-1'))
+  assert.notEqual(after[0].id, before[0].id)
+  assert.notEqual(after[0].label, before[0].label)
+  // The same state the feed's act gives.
+  assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, after[0].id === 'markRead')
+  await h.stop()
+})
+
+test('overlay buttons: a refused act shows in the notice and throws, not silent', async () => {
+  const { ctx, h } = boot()
+  await h.pollNow('test')
+  const provider = ctx.buttonProviders[0].provider
+  const [button] = await provider(ITEM('ABC-1'))
+  // The seen marks are gone (as before the first poll): setRead refuses and act answers ok: false.
+  h.S.seen = null
+  await assert.rejects(button.run(ITEM('ABC-1')), /no poll yet/)
+  assert.equal(ctx.lastState().notice.kind, 'error')
+  assert.match(ctx.lastState().notice.text, /no poll yet/)
+  await h.stop()
+})
+
+test('overlay buttons: a ctx without the member still activates and opens an issue', async () => {
+  const { ctx, h } = boot({ noButtons: true, reviewer: { annotate: async () => ({}) } })
+  await h.pollNow('test')
+  assert.equal(ctx.buttonProviders.length, 0)
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(ctx.lastState().notice, null)
   await h.stop()
 })

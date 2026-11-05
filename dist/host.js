@@ -374,11 +374,64 @@ function start(ctx, io = {}) {
    */
   async function openIssue(key) {
     const pre = await prepareView(key)
+    // Without the reviewer our own reader page is the overlay, so it is up before the issue is read
+    // (`ready: 'manual'`: its loader stays until the page has drawn the issue).
+    const early = pre || annotateOn() ? null : startReader(key)
     try {
-      await showIssue(key, pre)
+      await showIssue(key, pre, early)
     } finally {
       if (pre) await cancelView(pre)
+      if (early && !early.used) {
+        try { early.handle.close() } catch {}
+      }
     }
+  }
+
+  /** The `inbox-item` type of an issue overlay (Inbox's and the buttons' key). */
+  function overlayType(key) {
+    return { name: 'inbox-item', data: { source: ctx.pluginId, id: key } }
+  }
+
+  /**
+   * The feed item an `inbox-item` overlay of ours names, or null (the data came from the opener: check it).
+   * Only an issue still in the lanes counts: one that left them (Done lane, a lane switched off) is no item
+   * Inbox shows, so its overlay gets no buttons, as `act` refuses it.
+   */
+  function ownItem(info) {
+    const d = info && info.type && info.type.data
+    if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
+    return feedList(Infinity).find((i) => i.id === d.id) || null
+  }
+
+  /**
+   * The item's actions but open, with `run` = the same code as the feed's `act`; labels follow the item's state.
+   * A refused act is shown in the panel's notice and thrown: the app only logs a run that throws, and an
+   * answer it does not read would make a failed Mark read silent.
+   */
+  function overlayButtons(info) {
+    const item = ownItem(info)
+    if (!item) return []
+    const run = async (action) => {
+      const r = await feedAct(item.id, action)
+      if (r && r.ok === false) {
+        setNotice(r.message, 'error')
+        throw new Error(r.message)
+      }
+    }
+    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
+  }
+
+  /** What Discuss with Claude sends for an issue overlay: key and summary, status and the latest comment, capped. */
+  function overlayDiscuss(key) {
+    const item = feedList(Infinity).find((i) => i.id === key)
+    if (!item) return null
+    const status = item.place && item.place.status ? item.place.status : ''
+    return { text: cut([`Jira issue: ${item.title}`, status ? `Status: ${status}` : '', item.preview ? `Latest: ${item.preview}` : ''].filter(Boolean).join('\n'), 4000) }
+  }
+
+  if (ctx.overlay && typeof ctx.overlay.buttons === 'function') {
+    // Dropped by the app when the plugin stops.
+    ctx.overlay.buttons('inbox-item', (info) => overlayButtons(info))
   }
 
   /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
@@ -398,7 +451,9 @@ function start(ctx, io = {}) {
     const row = rowOf(key)
     const title = row && row.issue.summary ? `${key}: ${oneLine(row.issue.summary)}` : key
     try {
-      await within(reviewer.prepare({ key: `jira:${key}`, title: title.slice(0, 200) }), REVIEWER_WAIT_MS)
+      // The type goes with prepare: the reviewer fixes an overlay's type when it starts, so the
+      // annotate that fills a prepared overlay cannot add it later (an older reviewer ignores it).
+      await within(reviewer.prepare({ key: `jira:${key}`, title: title.slice(0, 200), type: overlayType(key) }), REVIEWER_WAIT_MS)
       return { key: `jira:${key}` }
     } catch {
       return null
@@ -410,7 +465,7 @@ function start(ctx, io = {}) {
     await within(reviewer.cancel({ key: pre.key }), REVIEWER_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
   }
 
-  async function showIssue(key, pre) {
+  async function showIssue(key, pre, early) {
     const got = await fullIssue(key)
     const { issue, lane, mark, stale } = got
     const site = cfg().site
@@ -433,7 +488,8 @@ function start(ctx, io = {}) {
     const view = async (aside = false) => (docs[aside] = docs[aside] || (await issueView(got, staleNote, aside)))
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
-      const base = { title, url, key: `jira:${key}`, ...(pick.tabId ? { tabId: pick.tabId } : {}) }
+      // An older reviewer ignores `type`.
+      const base = { title, url, key: `jira:${key}`, type: overlayType(key), ...(pick.tabId ? { tabId: pick.tabId } : {}) }
       let htmlError = null
       if (!S.htmlRejected) {
         // The details column needs a reviewer with `aside` (cc-cockpit 0.9.1+). No service says which
@@ -471,7 +527,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(issue, await view(), url)
+    await plainReader(issue, await view(), url, early)
   }
 
   // cc-cockpit before 0.8.0: no annotate. Remember it for this run and use our own page.
@@ -515,22 +571,38 @@ function start(ctx, io = {}) {
    * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
    * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
    */
-  async function plainReader(issue, view, url) {
-    let handle
+  /** Starts the reader page's overlay (before the issue is read when it can); null when the app refuses. */
+  function startReader(key, issue) {
+    const row = issue ? null : rowOf(key)
+    const summary = issue ? issue.summary : row ? row.issue.summary : ''
     try {
-      handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: `${issue.key}: ${cut(oneLine(issue.summary), 80)}`, size: 'large' })
+      const handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: `${key}: ${cut(oneLine(summary || ''), 80)}`, size: 'large', ready: 'manual', type: overlayType(key) })
+      if (typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(key))
+      return { handle, used: false }
     } catch (e) {
       setNotice(`Cannot open the reader: ${e.message}`, 'error')
-      return
+      return null
     }
+  }
+
+  async function plainReader(issue, view, url, early) {
+    const started = early || startReader(issue.key, issue)
+    if (!started) return
+    started.used = true
+    const handle = started.handle
     const parts = []
     for (let i = 0; i < view.html.length; i += PAGE_HTML_PART) parts.push(view.html.slice(i, i + PAGE_HTML_PART))
     try {
-      handle.post({ type: 'doc', key: issue.key, summary: issue.summary, url, parts: parts.length, assets: view.assets.length })
+      // With the app's overlay toolbar (Discuss with Claude, New session) the page drops its own two buttons.
+      const toolbar = typeof ctx.overlay.buttons === 'function' && typeof handle.onDiscuss === 'function'
+      handle.post({ type: 'doc', key: issue.key, summary: issue.summary, url, parts: parts.length, assets: view.assets.length, ...(toolbar ? { toolbar: true } : {}) })
       parts.forEach((part, i) => handle.post({ type: 'html', i, part }))
       for (const a of view.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
     } catch (e) {
       ctx.log.warn(`posting ${issue.key} to the reader: ${e.message}`)
+      // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
+      setNotice(`Cannot show ${issue.key}: ${e.message}`, 'error')
+      try { handle.close() } catch {}
     }
     handle.onMessage((m) => {
       if (m && typeof m.open === 'string') void openUrl(m.open).catch((e) => setNotice(e.message, 'error'))
