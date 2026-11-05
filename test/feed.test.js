@@ -364,6 +364,44 @@ test('act open with nothing on screen yet (a reviewer without prepare, or a prep
   }
 })
 
+// Round-3 review: an open that ended without anything on screen (the reviewer refused the issue, or
+// the app refused the reader page) set the panel's notice and returned, and act still answered ok.
+test('act open: a reviewer (without prepare) refusing the issue is the act\'s refusal, with the notice\'s text', async () => {
+  const calls = []
+  const reviewer = {
+    annotate: async (a) => {
+      calls.push(a.key)
+      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+    },
+  }
+  const { ctx, h } = boot({ reviewer })
+  await h.pollNow('test')
+  await h.S.classifying
+  const r = await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^jira: The reviewer could not open ABC-1: .*at most 3 open/)
+  assert.deepEqual(calls, ['jira:ABC-1', 'jira:ABC-1'], 'html, then text')
+  assert.equal(h.S.notice.kind, 'error', 'the panel says it too')
+  assert.equal(ctx.overlays.length, 0)
+  await h.stop()
+})
+
+test('act open: the app refusing our reader page is the act\'s refusal, with the notice\'s text', async () => {
+  const { ctx, h } = boot({
+    mutate: (c) => {
+      c.overlay.start = () => {
+        throw new Error('overlay: at most 3 open')
+      }
+    },
+  })
+  await h.pollNow('test')
+  await h.S.classifying
+  const r = await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^jira: Cannot open the reader: overlay: at most 3 open/)
+  await h.stop()
+})
+
 test('act markUnread then markRead: the plugin\'s seen marks, the item follows', async () => {
   const b = boot()
   await b.h.pollNow('test')
