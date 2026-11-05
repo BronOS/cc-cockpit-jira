@@ -227,6 +227,8 @@ function fakeCtx(opts = {}) {
         })
       },
       available: (name) => Boolean(services[name]),
+      // A newer app's pick for a used name (ctx.services.provider); tests that need another reviewer replace it.
+      provider: (name) => (services[name] ? `cockpit.${name}` : null),
       // What the host provides, called the way another plugin's handle would: arguments and results
       // structured-cloned, `caller()` set to `as` for the call.
       provide(name, impl) {

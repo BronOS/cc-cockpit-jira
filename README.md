@@ -184,8 +184,10 @@ cc-cockpit 0.10.0 for Inbox 0.2.0 to read it; the toolbar buttons below need an 
 once with `ready: 'manual'`, before the issue is read, and drops its loader once the issue is drawn).
 On an app that has `ctx.overlay.buttons`, the overlay of an issue still in the lanes gets Mark read /
 Mark unread in its toolbar (the same code as the feed's `act`; a failure shows in the panel's notice),
-and Discuss with Claude sends the key, summary, status and the latest comment. Only an overlay this plugin or the bundled reviewer (`cockpit.reviewer`) opened gets them (the app's
-`opener`, not the overlay's data): another plugin opening an overlay that names one of our issues gets none. The reader page then
+and Discuss with Claude sends the key, summary, status and the latest comment. Only an overlay this plugin or the project's `reviewer` provider opened gets them (the app's
+`opener`, not the overlay's data; the reviewer is the one `ctx.services.provider('reviewer')` names when the
+buttons are asked for, so a replacement reviewer the project picked gets them and the bundled `cockpit.reviewer`, not
+picked, does not; an older app without `ctx.services.provider` trusts `cockpit.reviewer`): another plugin opening an overlay that names one of our issues gets none. The reader page then
 drops its own Discuss and New session buttons (an older app keeps them).
 
 ## CLI
