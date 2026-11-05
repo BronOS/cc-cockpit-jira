@@ -310,7 +310,7 @@ test('act open: a listed key opens its issue view, as a row click does', async (
   await h.pollNow('test')
   await h.S.classifying
   assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  // act answers once the open has started: the read and the annotate go on after it.
+  // A reviewer without prepare: nothing is on screen before the annotate, so act answers after it.
   await until(() => calls.length === 1)
   assert.equal(calls[0].key, 'jira:ABC-1')
   await h.stop()
@@ -324,6 +324,44 @@ test('act open without a reviewer: the plugin\'s own page', async () => {
   assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
   assert.ok(ctx.overlays.length > before)
   await h.stop()
+})
+
+// Round-2 review: act answered ok before anything was on screen, so a failed read went only to this
+// panel's notice and Inbox ended the item's "back" mark for an open the person never saw.
+test('act open with nothing on screen yet (a reviewer without prepare, or a prepare that failed): a failed read is the act\'s refusal', async () => {
+  const calls = []
+  const annotate = async (a) => (calls.push(a.key), { opened: true })
+  const reviewers = {
+    'no prepare': { annotate },
+    'prepare failed': {
+      prepare: async () => {
+        throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+      },
+      cancel: async () => ({ closed: false }),
+      annotate,
+    },
+  }
+  for (const [name, reviewer] of Object.entries(reviewers)) {
+    const jira = {}
+    const { ctx, h } = boot({ reviewer, jira })
+    await h.pollNow('test')
+    await h.S.classifying
+    // The issue is gone at Jira by the time it is opened, with no cached copy to fall back on.
+    jira.fail = { 'ABC-1': 404 }
+    const cached = h.S.cache.issues['ABC-1']
+    delete h.S.cache.issues['ABC-1']
+    const r = await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
+    assert.equal(r.ok, false, name)
+    assert.match(r.message, /^jira: .*nope/, name)
+    assert.deepEqual(calls, [], `${name}: nothing was annotated`)
+    assert.equal(ctx.overlays.length, 0, `${name}: no reader page either`)
+    // The same reviewer opens an issue that can be read: ok once the reviewer's overlay is filled.
+    delete jira.fail
+    h.S.cache.issues['ABC-1'] = cached
+    assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true }, name)
+    assert.deepEqual(calls.splice(0), ['jira:ABC-1'], name)
+    await h.stop()
+  }
 })
 
 test('act markUnread then markRead: the plugin\'s seen marks, the item follows', async () => {

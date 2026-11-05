@@ -371,15 +371,22 @@ function start(ctx, io = {}) {
    * the issue with its comments and images takes seconds, with nothing on screen meanwhile
    * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
    * read, our own reader page) closes it in the finally.
+   * `onStarted` (feed act) runs only once something is on screen: the prepared overlay, our reader
+   * page, or (neither: a reviewer without prepare, a prepare that failed or ran past its wait) the
+   * filled view at the end. Called earlier, a failed read reached only this panel's notice while
+   * the person clicked in Inbox, and Inbox ended the item's "back" mark for an open never seen.
    */
   async function openIssue(key, onStarted) {
+    const shown = () => {
+      if (onStarted) onStarted()
+    }
     const pre = await prepareView(key)
     // Without the reviewer our own reader page is the overlay, so it is up before the issue is read
     // (`ready: 'manual'`: its loader stays until the page has drawn the issue).
     const early = pre || annotateOn() ? null : startReader(key)
-    if (onStarted) onStarted()
+    if (pre || early) shown()
     try {
-      await showIssue(key, pre, early)
+      await showIssue(key, pre, early, shown)
     } finally {
       if (pre) await cancelView(pre)
       if (early && !early.used) {
@@ -466,7 +473,7 @@ function start(ctx, io = {}) {
     await within(reviewer.cancel({ key: pre.key }), REVIEWER_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
   }
 
-  async function showIssue(key, pre, early) {
+  async function showIssue(key, pre, early, shown = () => {}) {
     const got = await fullIssue(key)
     const { issue, lane, mark, stale } = got
     const site = cfg().site
@@ -528,7 +535,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(issue, await view(), url, early)
+    await plainReader(issue, await view(), url, early, shown)
   }
 
   // cc-cockpit before 0.8.0: no annotate. Remember it for this run and use our own page.
@@ -590,10 +597,12 @@ function start(ctx, io = {}) {
    * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
    * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
    */
-  async function plainReader(issue, view, url, early) {
+  async function plainReader(issue, view, url, early, shown = () => {}) {
     const started = early || startReader(issue.key, issue)
     if (!started) return
     started.used = true
+    // On screen now; the wait below lasts until the person closes the page (feed act answers here).
+    shown()
     const handle = started.handle
     const parts = []
     for (let i = 0; i < view.html.length; i += PAGE_HTML_PART) parts.push(view.html.slice(i, i + PAGE_HTML_PART))
@@ -890,7 +899,9 @@ function start(ctx, io = {}) {
 
   /**
    * `act(id, 'open')` of the feed: resolves once the open has started (the reviewer's overlay
-   * prepared, or our own reader page up), not when it is over. The rest (reading the issue, the
+   * prepared, or our own reader page up), not when it is over; with neither (a reviewer without
+   * prepare, or a prepare that failed) once the issue is shown, so a failed read is still the act's
+   * refusal. The rest (reading the issue, the
    * annotate, and without the reviewer the wait for our reader page to close) runs on: Inbox gives
    * every act 10 s, and an open that waited for all that was reported as failed while it was on
    * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
