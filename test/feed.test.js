@@ -686,9 +686,9 @@ test('an older app (services without useAll or emit) still activates, provides a
   await h.stop()
 })
 
-test('the manifest provides jira 1 and inbox-feed 2 at 0.7.0', () => {
+test('the manifest provides jira 1 and inbox-feed 2 at 0.7.1', () => {
   const m = require('../plugin.json')
-  assert.equal(m.version, '0.7.0')
+  assert.equal(m.version, '0.7.1')
   assert.deepEqual(m.services.provides, { jira: 1, 'inbox-feed': 2 })
 })
 
