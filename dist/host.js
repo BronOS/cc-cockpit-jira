@@ -386,8 +386,9 @@ function start(ctx, io = {}) {
    * failure that has nothing to do with html (the overlay could not open) does not switch modes.
    * The reviewer's overlay is up before the issue is read (its prepare, where it has one): reading
    * the issue with its comments and images takes seconds, with nothing on screen meanwhile
-   * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
-   * read, our own reader page) closes it in the finally.
+   * (real-work feedback 8). The annotate below fills that overlay; a failed read with no cached copy
+   * turns it into the error page with Try again where the reviewer has `fail` (failView); whatever
+   * else happens (an older reviewer's failed read, our own reader page) closes it in the finally.
    * `onStarted` (feed act) runs only once something is on screen: the prepared overlay, our reader
    * page, or (neither: a reviewer without prepare, a prepare that failed or ran past its wait) the
    * filled view at the end. Called earlier, a failed read reached only this panel's notice while
@@ -407,10 +408,62 @@ function start(ctx, io = {}) {
     try {
       await showIssue(key, pre, early, shown)
     } finally {
-      if (pre) await cancelView(pre)
+      // A loader turned into the read's error page (failView) stays: it is the person's to close.
+      if (pre && !pre.failed) await cancelView(pre)
       if (early && !early.used) closeQuietly(early.handle)
     }
   }
+
+  // Issues whose reviewer loader shows a failed read with Try again (failView): reviewer key -> issue key.
+  const failedViews = new Map()
+
+  /**
+   * A read that failed after the reviewer's loader was up, with no cached copy to show instead
+   * (fullIssue falls back to the last poll's copy of an issue in the lanes): the loader shows the
+   * error with Try again (the reviewer's `fail`, cc-cockpit 0.13.2) instead of closing. Cancelling it,
+   * as before, made a network outage flash the overlay open and shut with no reason on screen: the
+   * error reached only this panel's notice, which a click in Inbox never shows. The act contract
+   * stays: the loader was on screen, so the feed's act answered ok at prepare; no seen mark is set
+   * (seen() never ran). True when the reviewer took it; false (an older reviewer without 'fail', the
+   * person closed the loader meanwhile) leaves the cancel to openIssue's finally, as before.
+   */
+  async function failView(pre, key, e) {
+    const msg = oneLine(e && e.message ? e.message : String(e))
+    const head = (e && (e.kind === 'network' || e.kind === 'timeout')) || /^cannot reach /i.test(msg) ? "Can't reach Jira" : 'Could not load this issue'
+    try {
+      const features = await within(reviewer.features(), REVIEWER_WAIT_MS)
+      if (!Array.isArray(features) || !features.includes('fail')) return false
+      // Try again only when its click can reach us (the event `action`).
+      const retry = typeof reviewer.on === 'function'
+      const r = await within(reviewer.fail({ key: pre.key, message: cut(`${head}: ${msg}`, 300), retry }), REVIEWER_WAIT_MS)
+      if (!(r && r.failed)) return false
+      if (retry) failedViews.set(pre.key, key)
+      return true
+    } catch (err) {
+      ctx.log.warn(`reviewer.fail: ${err && err.message ? err.message : err}`)
+      return false
+    }
+  }
+
+  /**
+   * Try again on an error page of ours (the reviewer's event `action` { key, id: 'retry', caller }):
+   * the normal open again, so the reviewer takes the page back to its loader (prepare), and the
+   * issue or the error once more fills it. Events reach every consumer: only our own key counts.
+   */
+  async function onReviewerAction(d) {
+    if (!d || d.caller !== ctx.pluginId || d.id !== 'retry' || typeof d.key !== 'string') return
+    const key = failedViews.get(d.key)
+    if (key === undefined) return
+    failedViews.delete(d.key)
+    try {
+      await openIssue(key)
+    } catch (e) {
+      // As a panel click's open: the log and the notice, beside the error page the retry put up again.
+      ctx.log.warn(`retry open: ${e && e.message ? e.message : e}`)
+      setNotice(e && e.message ? e.message : String(e), 'error')
+    }
+  }
+  if (typeof reviewer.on === 'function') reviewer.on('action', (d) => void onReviewerAction(d).catch((e) => ctx.log.warn(`reviewer action: ${e && e.message ? e.message : e}`)))
 
   /** The `inbox-item` type of an issue overlay (Inbox's and the buttons' key). */
   function overlayType(key) {
@@ -524,7 +577,15 @@ function start(ctx, io = {}) {
   }
 
   async function showIssue(key, pre, early, shown = () => {}) {
-    const got = await fullIssue(key)
+    let got
+    try {
+      got = await fullIssue(key)
+    } catch (e) {
+      // The loader shows the failure (and openIssue leaves it); the error still goes on to the
+      // panel's notice and the log, as before.
+      if (pre) pre.failed = await failView(pre, key, e)
+      throw e
+    }
     const { issue, lane, mark, stale } = got
     const site = cfg().site
     const staleNote = stale ? `Jira could not be reached, this is the copy from the last poll: ${stale}` : ''

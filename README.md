@@ -118,6 +118,12 @@ Opening an issue reads it fresh from Jira and shows it as a styled page:
   when the text does not), other files and images that are not shown are links to them in Jira
   (your browser's Jira session opens them).
 
+When Jira cannot be reached, an issue in the lanes opens as the copy from the last poll, with a line
+saying so. One with no such copy keeps the reviewer's overlay open with the error and a **Try again**
+button, which reads it again in the same overlay (0.7.3; it needs cc-cockpit 0.13.2 or later; an
+older app closes the overlay as before and the error shows in the panel). An issue that was never
+shown stays unread.
+
 The page is built by the plugin from Jira's document format, never from Jira's own HTML: every text
 is escaped, links keep only `http(s)` and `mailto` addresses, and no picture is loaded from the
 network by the page.

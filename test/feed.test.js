@@ -454,6 +454,70 @@ test('act open: the loader the person closed (annotate { opened: false }) leaves
   await b.h.stop()
 })
 
+// A failed read with no cached copy used to cancel the reviewer's loader: the overlay flashed open and
+// shut with no reason. With the reviewer's fail (cc-cockpit 0.13.2) the loader shows the error with
+// Try again; the act contract is unchanged (the loader was on screen: ok at prepare), the issue stays
+// unread, and Try again opens it in the same overlay.
+test('act open: a read that fails after prepare leaves the error page; Try again opens the issue; unread until then', async () => {
+  const order = []
+  const reviewer = {
+    features: async () => ['prepare', 'fail'],
+    prepare: async (s) => (order.push(['prepare', s.key]), { opened: true }),
+    cancel: async (s) => (order.push(['cancel', s.key]), { closed: true }),
+    fail: async (s) => (order.push(['fail', s.key, s.retry, s.message]), { failed: true }),
+    annotate: async (a) => (order.push(['annotate', a.key]), { opened: true }),
+  }
+  const jira = {}
+  const b = boot({ reviewer, jira, project: ON })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
+  jira.fail = { 'ABC-1': 404 }
+  const cached = b.h.S.cache.issues['ABC-1']
+  delete b.h.S.cache.issues['ABC-1']
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  await until(() => order.length === 2)
+  await settle()
+  assert.deepEqual(order.map((o) => o.slice(0, 3)), [['prepare', 'jira:ABC-1'], ['fail', 'jira:ABC-1', true]])
+  assert.match(order[1][3], /^Could not load this issue: /)
+  assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
+  assert.equal(b.h.S.notice.kind, 'error', 'the panel says it too, as before')
+  // Try again: only our own caller and key count.
+  const fire = (d) => b.ctx.handles.reviewer.listeners.action.forEach((fn) => fn(d))
+  fire({ key: 'jira:ABC-1', id: 'retry', caller: 'someone.else' })
+  fire({ key: 'jira:ABC-2', id: 'retry', caller: 'bronos.jira' })
+  await settle()
+  assert.equal(order.length, 2)
+  delete jira.fail
+  b.h.S.cache.issues['ABC-1'] = cached
+  fire({ key: 'jira:ABC-1', id: 'retry', caller: 'bronos.jira' })
+  await until(() => order.length === 5)
+  assert.deepEqual(order.slice(2), [['prepare', 'jira:ABC-1'], ['annotate', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
+  for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
+  assert.equal(await readOf(b, 'ABC-1'), true, 'shown now')
+  await b.h.stop()
+})
+
+test('act open: a reviewer without fail (an older app) cancels the loader on a failed read, as before', async () => {
+  const order = []
+  const reviewer = {
+    features: async () => ['prepare'],
+    prepare: async (s) => (order.push(['prepare', s.key]), { opened: true }),
+    cancel: async (s) => (order.push(['cancel', s.key]), { closed: true }),
+    annotate: async () => ({ opened: true }),
+  }
+  const jira = {}
+  const b = boot({ reviewer, jira })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  jira.fail = { 'ABC-1': 404 }
+  delete b.h.S.cache.issues['ABC-1']
+  await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
+  await until(() => order.length === 2)
+  assert.deepEqual(order, [['prepare', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
+  await b.h.stop()
+})
+
 test('our reader page closed before the issue reached it leaves the issue unread; one still open marks it read', async () => {
   let keepOpen = false
   const b = boot({
@@ -686,9 +750,9 @@ test('an older app (services without useAll or emit) still activates, provides a
   await h.stop()
 })
 
-test('the manifest provides jira 1 and inbox-feed 2 at 0.7.2', () => {
+test('the manifest provides jira 1 and inbox-feed 2 at 0.7.3', () => {
   const m = require('../plugin.json')
-  assert.equal(m.version, '0.7.2')
+  assert.equal(m.version, '0.7.3')
   assert.deepEqual(m.services.provides, { jira: 1, 'inbox-feed': 2 })
 })
 
