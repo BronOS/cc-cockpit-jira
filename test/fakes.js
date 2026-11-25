@@ -34,6 +34,8 @@ function fakeJira(opts = {}) {
   const calls = []
   const writes = []
   const expected = 'Basic ' + Buffer.from(`${EMAIL}:${opts.token || TOKEN}`).toString('base64')
+  // `opts.alsoToken`: a second token the site takes too (a valid replacement set in the settings).
+  const also = opts.alsoToken ? 'Basic ' + Buffer.from(`${EMAIL}:${opts.alsoToken}`).toString('base64') : null
   const cloudId = fixture('tenant_info.json').cloudId
   async function fetch(url, init = {}) {
     const headers = init.headers || {}
@@ -53,7 +55,7 @@ function fakeJira(opts = {}) {
     }
     let rest
     if (u.origin === SITE) {
-      if (opts.scoped || headers.Authorization !== expected) return json(fixture('error-401.json'), 401)
+      if (opts.scoped || (headers.Authorization !== expected && headers.Authorization !== also)) return json(fixture('error-401.json'), 401)
       rest = u.pathname
     } else if (u.origin === GATEWAY && u.pathname.startsWith(`/ex/jira/${cloudId}/`)) {
       if (!opts.scoped || headers.Authorization !== expected) return json(fixture('error-401.json'), 401)

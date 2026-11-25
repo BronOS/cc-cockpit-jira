@@ -28,6 +28,9 @@ function fakePage() {
       if (page.hold) page.held.push(ack)
       else ack()
       st.drawn = true
+    } else if (m.type === 'collect' && page.onCollect) {
+      // A test answers the collect itself (later, or with other values).
+      page.onCollect(o, m, st)
     } else if (m.type === 'collect') {
       o.send({ type: 'values', n: m.n, comment: st.comment, transitionId: st.transitionId, rev: st.rev })
     } else if (m.type === 'result' && m.clearComment) {
@@ -67,7 +70,7 @@ function boot(opts = {}) {
   const jira = fakeJira(jiraOpts)
   const page = fakePage()
   const ctx = fakeCtx({ project: { ...CONFIGURED, ...(opts.project || {}) }, triage: fakeTriage(), sessions: opts.sessions, overlayWait: true, buttons: true, noToolbar: opts.noToolbar, page })
-  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000 })
+  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, draftWaitMs: opts.draftWaitMs })
   return { jira, ctx, h, page, jiraOpts }
 }
 
@@ -436,5 +439,83 @@ test('R1-5: a poll that started before a write does not bring the old status bac
   // A follow-up poll was queued behind the stale one, and it agrees.
   await until(() => !h.S.polling)
   assert.ok(!inProgress().includes('ABC-1'))
+  await h.stop()
+})
+
+// ---- review round 2 (codex sol/high) ----
+
+test('R2-1: ccc direct writes with the client and settings it started with, never ones set during its reads', async () => {
+  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
+  const { ctx, h, jira } = boot({ project: { writes: 'direct' }, jira: { routes: g.route, alsoToken: 'replacement-token' } })
+  await h.pollNow('test')
+  g.armed = true
+  const cli = ctx.runCli(['update', 'ABC-1', '--status', 'Done', '-'], { stdin: 'hi' })
+  await until(() => g.hit > 0)
+  // A valid replacement token (still direct) set while the transitions are read.
+  await ctx.changeSettings({ ...CONFIGURED, writes: 'direct', apiToken: 'replacement-token' })
+  g.open()
+  const r = await cli
+  assert.equal(jira.writes.length, 0, 'not written with the new token, nor with the old one')
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, /settings \(site, email or token\) changed.*nothing was written/)
+  await h.stop()
+})
+
+test('R2-2: writes switched off while the client settles its token kind (before any poll): no POST', async () => {
+  const g = gate((url, init) => init.method !== 'POST' && url.endsWith('/rest/api/3/myself'))
+  const { ctx, h, jira } = boot({ project: { writes: 'direct' }, jira: { routes: g.route } })
+  g.armed = true
+  const cli = ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'hi' }) // comment only: no read before the POST
+  await until(() => g.hit > 0)
+  await ctx.changeSettings({ ...CONFIGURED, writes: 'off' })
+  g.open()
+  const r = await cli
+  assert.equal(jira.writes.length, 0)
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, /writing is off.*nothing was written/)
+  await h.stop()
+})
+
+test('R2-3: a fill the page refused, answered after the wait, does not leave every later click refused', async () => {
+  const { ctx, h, jira, page } = boot({ draftWaitMs: 50 })
+  await h.pollNow('test')
+  await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })
+  const [o] = replyPages(ctx)
+  // The person types (their edit message still on the way) as a second draft arrives; the page keeps
+  // their words and its "not applied" answer comes after the host stopped waiting.
+  page.state(o).dirty = true
+  page.state(o).comment = 'my words'
+  page.hold = true
+  await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'second' })
+  await new Promise((r) => setTimeout(r, 150)) // past the host's own wait for the page's answer
+  page.release()
+  await until(() => h.S && [...o.posts].some((m) => m.type === 'issue' && m.fill && m.fill.n === 2))
+  await o.click('send', OWNER)
+  assert.deepEqual(jira.writes.map((w) => [w.what, w.body.body.content[0].content[0].text]), [['comment', 'my words']])
+  await h.stop()
+})
+
+test('R2-4: a click refused after the collect leaves the button usable, also when a load finished meanwhile', async () => {
+  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
+  const { ctx, h, jira, page } = boot({ jira: { routes: g.route } })
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
+  const [o] = replyPages(ctx)
+  await until(() => lastOf(o, 'issue'))
+  page.edit(o, 'hi')
+  g.armed = true
+  o.send({ type: 'reload' }, OWNER) // a re-read under way (Try again)
+  await until(() => g.hit > 0)
+  let answer
+  page.onCollect = (q, m, st) => (answer = () => q.send({ type: 'values', n: m.n, comment: st.comment, transitionId: '', rev: 99 }))
+  const click = o.click('send', OWNER)
+  await until(() => answer)
+  g.armed = false
+  g.open() // the load finishes while the click waits for the page's values
+  await until(() => o.posts.filter((m) => m.type === 'issue').length >= 2)
+  answer() // values of a revision the host did not see drawn: refused
+  await click
+  assert.equal(jira.writes.length, 0)
+  assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled), Boolean(b.busy)]), [['Post comment', false, false]])
   await h.stop()
 })

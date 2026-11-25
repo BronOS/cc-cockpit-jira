@@ -223,8 +223,12 @@ function createClient(o) {
    * auto client retrying a write through the gateway after the site's 401 would be a second write
    * attempt). No redirect is followed (guardedWrite).
    */
-  async function post(path, body, what, signal) {
+  async function post(path, body, what, signal, guard) {
     if (mode === null) await myself(signal)
+    // The caller's last word, after the token-kind read above (review R2-2): settings changed during
+    // it (writing switched off, another token) stop the write here, before anything is sent.
+    const stop = typeof guard === 'function' ? guard() : null
+    if (stop) throw new JiraError(stop, { kind: 'stopped' })
     const trusted = new Set([httpsOrigin(baseFor(mode))])
     const res = await guardedWrite(baseFor(mode) + path, { method: 'POST', body, auth, trusted, fetch: fetchFn, what, signal })
     return readWrite(res, what)
@@ -239,13 +243,14 @@ function createClient(o) {
 
   /**
    * Post a comment: plain text as ADF (lib/write.js commentAdf), at most 32,000 characters, refused
-   * before the call when empty or longer. Resolves `{ id }`.
+   * before the call when empty or longer. `opts.guard()` is asked right before the POST (a message
+   * stops it: a JiraError of kind `stopped`). Resolves `{ id }`.
    */
-  async function comment(key, text, signal) {
+  async function comment(key, text, signal, opts = {}) {
     const k = writeKey(key)
     const c = checkComment(text)
     if (c.error) throw new JiraError(`comment on ${k}: ${c.error}`, { kind: 'invalid' })
-    const body = await post(`/rest/api/3/issue/${k}/comment`, { body: commentAdf(c.text) }, `comment on ${k}`, signal)
+    const body = await post(`/rest/api/3/issue/${k}/comment`, { body: commentAdf(c.text) }, `comment on ${k}`, signal, opts.guard)
     return { id: body && body.id != null ? String(body.id) : '' }
   }
 
@@ -260,11 +265,11 @@ function createClient(o) {
   }
 
   /** Run a transition by id (digits only): `{ transition: { id } }`, no fields. */
-  async function transition(key, id, signal) {
+  async function transition(key, id, signal, opts = {}) {
     const k = writeKey(key)
     const sid = String(id)
     if (!/^[0-9]{1,10}$/.test(sid)) throw new JiraError('a transition id is digits only', { kind: 'unsafe' })
-    await post(`/rest/api/3/issue/${k}/transitions`, { transition: { id: sid } }, `moving ${k}`, signal)
+    await post(`/rest/api/3/issue/${k}/transitions`, { transition: { id: sid } }, `moving ${k}`, signal, opts.guard)
   }
 
   return {

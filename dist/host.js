@@ -67,6 +67,7 @@ function start(ctx, io = {}) {
   const fetchFn = io.fetch || globalThis.fetch
   const platform = io.platform || process.platform
   const now = io.now || Date.now
+  const draftWaitMs = io.draftWaitMs || DRAFT_WAIT_MS // the suites shorten it
   const triage = ctx.services.use('triage')
   const reviewer = ctx.services.use('reviewer')
   const cacheFile = jsonFile(ctx.dataDir, 'cache.json')
@@ -1014,10 +1015,11 @@ function start(ctx, io = {}) {
     let applied = true
     if (acked) {
       // A page that never answers (it did not load) took nothing the person could have edited.
-      const ack = await settleWithin(acked, DRAFT_WAIT_MS, { applied: true, late: true })
+      const ack = await settleWithin(acked, draftWaitMs, { applied: true, late: true })
       applied = !(ack && ack.applied === false)
-      // No answer in time: taken as drawn (as the page does on load); a late answer still corrects it.
-      if (ack && ack.late) filled(page, n, true)
+      // No answer in time: no longer pending, but not taken as drawn either (review R2-3): only the
+      // page's own answer, however late, moves the revision a click is bound to.
+      if (ack && ack.late && page.fillPending === n) page.fillPending = null
       if (applied) page.form = { comment: form.comment, transitionId: form.transitionId }
       else page.edited = true
     }
@@ -1175,7 +1177,10 @@ function start(ctx, io = {}) {
       postReply(page, { type: 'collect', n })
       values = await settleWithin(got, PAGE_ANSWER_MS, null)
     } finally {
+      // Every release of the lock redraws the button (review R2-4): a load that finished meanwhile drew
+      // it busy, and a refusal below returns without drawing it again.
       page.busy = false
+      updateButton(page)
     }
     if (!values) return postReply(page, { type: 'error', message: 'The page did not answer; nothing was written. Try again.' })
     // No await from here into send's own lock: nothing can slip in between.
@@ -1325,7 +1330,7 @@ function start(ctx, io = {}) {
       const r = await openReply(key, { comment: o.comment || '', status: o.status || null, marker: wr.draftMarker(o.tabId, tab) })
       const editing = `The person is editing a reply to ${key}: their page was left alone and this draft was not opened. Nothing was written.`
       if (r.decision === 'refuse') return { code: 1, text: editing }
-      const loaded = await settleWithin(r.load, DRAFT_WAIT_MS, { ok: true, late: true })
+      const loaded = await settleWithin(r.load, draftWaitMs, { ok: true, late: true })
       if (loaded && loaded.applied === false) return { code: 1, text: editing }
       const lines = [`Draft opened for ${key}: the person posts it.`]
       if (loaded && loaded.asked) lines.push(`The status was left at Keep status: ${loaded.asked}`)
@@ -1334,17 +1339,22 @@ function start(ctx, io = {}) {
       lines.push('Nothing was written: the person decides on the page. Do not run this again to post it.')
       return { code: 0, text: lines.join('\n') }
     }
-    // direct: an unknown or disabled status is refused before anything is written.
+    // direct: the client and the settings it was asked under, taken before the first await and kept
+    // for the whole write (review R2-1): settings changed during the reads stop it (the guard), and
+    // a replacement token or site set meanwhile is never the one that writes.
+    const c = client()
+    const guard = writeGuard('direct')
+    // An unknown or disabled status is refused before anything is written.
     let transitionId = ''
     let fresh
     if (o.status) {
-      fresh = await client().transitions(key, o.signal)
+      fresh = await c.transitions(key, o.signal)
       const m = wr.matchStatus(fresh, o.status)
       if (!m.transition) return { code: 1, text: `${key}: ${wr.statusProblem(m, o.status, fresh)} Nothing was written.` }
       transitionId = m.transition.id
     }
     const comment = o.comment ? wr.checkComment(o.comment).text || '' : ''
-    const r = await wr.performWrite({ client: client(), key, comment, transitionId, fresh, guard: writeGuard('direct'), signal: o.signal })
+    const r = await wr.performWrite({ client: c, key, comment, transitionId, fresh, guard, signal: o.signal })
     if (r.steps.some((x) => x.ok)) await afterWrite(key)
     const lines = r.steps.length ? wr.stepLines(key, r.steps) : [`${key}: ${r.error || 'nothing was written'}`]
     return { code: r.ok ? 0 : 1, text: lines.join('\n') }

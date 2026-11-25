@@ -242,9 +242,11 @@ async function performWrite(o) {
     const stop = guard()
     if (stop) return { ok: false, steps, error: `${stop}; nothing was written` }
     try {
-      await client.comment(key, comment, signal)
+      // The guard again inside the client, after its token-kind read (review R2-2).
+      await client.comment(key, comment, signal, { guard: o.guard })
       steps.push({ step: 'comment', ok: true })
     } catch (e) {
+      if (e && e.kind === 'stopped') return { ok: false, steps, error: `${e.message}; nothing was written` }
       steps.push({ step: 'comment', ok: false, message: msg(e) })
       // No move after a failed comment: the comment that explains it would be missing.
       if (chosen) steps.push({ step: 'transition', ok: false, message: 'not tried: the comment failed' })
@@ -276,10 +278,11 @@ async function performWrite(o) {
       return { ok: false, steps, transitions }
     }
     try {
-      await client.transition(key, chosen.id, signal)
+      await client.transition(key, chosen.id, signal, { guard: o.guard })
       steps.push({ step: 'transition', ok: true, to: target })
     } catch (e) {
-      steps.push({ step: 'transition', ok: false, message: msg(e), to: target })
+      if (e && e.kind === 'stopped' && !steps.length) return { ok: false, steps, transitions, error: `${e.message}; nothing was written` }
+      steps.push({ step: 'transition', ok: false, message: e && e.kind === 'stopped' ? `not tried: ${e.message}` : msg(e), to: target })
     }
   }
   return { ok: steps.length > 0 && steps.every((s) => s.ok), steps, ...(transitions ? { transitions } : {}), ...(status !== undefined ? { status, category } : {}) }
