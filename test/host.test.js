@@ -634,7 +634,7 @@ test('overlay buttons: only for our own items, labels follow state, run = act', 
   assert.deepEqual(await provider(ITEM('NOPE-1')), [])
   assert.deepEqual(await provider({ type: { name: 'inbox-item', data: null }, title: 't', opener: 'x' }), [])
   const before = await provider(ITEM('ABC-1'))
-  assert.equal(before.length, 1)
+  assert.deepEqual(before.map((b) => b.id), [before[0].id, 'reply'])
   assert.ok(!before.some((b) => b.id === 'open'))
   assert.match(before[0].label, /read/i)
   await before[0].run(ITEM('ABC-1'))
@@ -658,9 +658,9 @@ test('overlay buttons: only on overlays we or the reviewer opened, whatever the 
   }
   assert.deepEqual(await provider({ type: by('x').type, title: 't' }), [])
   // Our own reader page and the reviewer we hand the item to (the project's pick) do.
-  assert.equal((await provider(by('bronos.jira'))).length, 1)
+  assert.equal((await provider(by('bronos.jira'))).length, 2, 'the item button and Reply')
   ctx.services.provider = (name) => (name === 'reviewer' ? 'cockpit.reviewer' : null)
-  assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  assert.equal((await provider(by('cockpit.reviewer'))).length, 2, 'the item button and Reply')
   await h.stop()
 })
 
@@ -673,12 +673,12 @@ test('overlay buttons: the reviewer the project picked, asked at button time; th
   const asked = []
   ctx.services.provider = (name) => (asked.push(name), name === 'reviewer' ? picked : null)
   // A replacement reviewer the project picked gets the buttons; the bundled one, not picked, does not.
-  assert.equal((await provider(by('other.reviewer'))).length, 1)
+  assert.equal((await provider(by('other.reviewer'))).length, 2, 'the item button and Reply')
   assert.deepEqual(await provider(by('cockpit.reviewer')), [])
   assert.ok(asked.includes('reviewer'))
   // The pick changes while we run: the next overlay follows it.
   picked = 'cockpit.reviewer'
-  assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  assert.equal((await provider(by('cockpit.reviewer'))).length, 2, 'the item button and Reply')
   assert.deepEqual(await provider(by('other.reviewer')), [])
   // No reviewer reachable, or the app refusing the name: no reviewer is trusted, our own page still is.
   picked = null
@@ -687,7 +687,7 @@ test('overlay buttons: the reviewer the project picked, asked at button time; th
     throw new Error('plugin bronos.jira does not declare service "reviewer" in services.uses')
   }
   assert.deepEqual(await provider(by('cockpit.reviewer')), [])
-  assert.equal((await provider(by('bronos.jira'))).length, 1)
+  assert.equal((await provider(by('bronos.jira'))).length, 2, 'the item button and Reply')
   await h.stop()
 })
 
@@ -697,9 +697,9 @@ test('overlay buttons: an older app without ctx.services.provider trusts the bun
   const provider = ctx.buttonProviders[0].provider
   const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1', opener: 'bronos.jira' } }, title: 't', opener })
   delete ctx.services.provider
-  assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  assert.equal((await provider(by('cockpit.reviewer'))).length, 2, 'the item button and Reply')
   assert.deepEqual(await provider(by('other.reviewer')), [])
-  assert.equal((await provider(by('bronos.jira'))).length, 1)
+  assert.equal((await provider(by('bronos.jira'))).length, 2, 'the item button and Reply')
   await h.stop()
 })
 

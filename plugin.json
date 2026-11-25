@@ -1,10 +1,10 @@
 {
   "id": "bronos.jira",
   "name": "Jira",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Read-only towards Jira. Provides the jira service (issue status, the issue view) to other plugins, such as bronos.gmail, and an inbox-feed of your issues for Inbox.",
+  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Comments and status changes from a reply page; ccc jira update drafts them for you to post (or writes directly, or is off: a setting). Provides the jira service (issue status, the issue view) to other plugins, such as bronos.gmail, and an inbox-feed of your issues for Inbox.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -39,7 +39,7 @@
             "type": "string",
             "format": "secret",
             "title": "API token",
-            "description": "Create one at id.atlassian.com > Security > API tokens. A token with scopes works too (read-only: read:jira-work and read:jira-user). Tokens expire: when Jira refuses it, create a new one here."
+            "description": "Create one at id.atlassian.com > Security > API tokens. A token with scopes works too: read:jira-work and read:jira-user to read, plus write:jira-work for comments and status changes (Reply, ccc jira update). Tokens expire: when Jira refuses it, create a new one here."
           },
           "tokenKind": {
             "type": "string",
@@ -137,6 +137,17 @@
               { "const": "summary", "title": "Summary only" }
             ],
             "default": "full"
+          },
+          "writes": {
+            "type": "string",
+            "title": "What ccc jira update does",
+            "description": "Claude drafts, I post: ccc jira update opens the reply page filled in and writes nothing until you click. ccc writes directly: it posts the comment and moves the issue itself. Read-only: the command is refused and the panel offers no Reply. The reply page always waits for your click.",
+            "oneOf": [
+              { "const": "draft", "title": "Claude drafts, I post" },
+              { "const": "direct", "title": "ccc writes directly" },
+              { "const": "off", "title": "Read-only" }
+            ],
+            "default": "draft"
           }
         }
       }
@@ -144,8 +155,10 @@
     "cli": [
       {
         "name": "jira",
-        "summary": "Jira: status, refresh, list the lanes, show an issue, mark read or unread",
-        "usage": "jira status | refresh | list [lane] | show <KEY> | read <KEY> | unread <KEY> | help"
+        "summary": "Jira: status, refresh, list the lanes, show an issue, mark read or unread, draft a comment or a status change",
+        "usage": "jira status | refresh | list [lane] | show <KEY> | read <KEY> | unread <KEY> | update <KEY> [--status <name>] [-] | help",
+        "stdin": true,
+        "stdinDash": true
       }
     ]
   },

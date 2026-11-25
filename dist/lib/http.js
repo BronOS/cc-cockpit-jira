@@ -9,6 +9,11 @@
 // checked, the Authorization header survives only a hop to the very origin it was sent to, and a
 // hop to plain http ends the request. fetch's own redirect handling cannot be told any of that
 // (it keeps the header on a same-origin hop and drops it cross-origin only in newer versions).
+//
+// Writes (0.8.0: a comment, a transition) are stricter still: `guardedWrite` follows no redirect at
+// all. A redirected POST is a misconfigured proxy or something pointing the body elsewhere, and
+// sending a write on (or turning it into a GET, as fetch does on a 303) could post a comment twice or
+// somewhere the person did not mean. So any 3xx ends the write with an error and nothing is re-sent.
 
 const GATEWAY = 'https://api.atlassian.com'
 const MAX_REDIRECTS = 3
@@ -149,32 +154,107 @@ function safeHost(url) {
  * do: a 401 is the expired-token case the design names.
  */
 async function readJson(res, what) {
-  if (res.status >= 200 && res.status < 300) {
-    const text = await res.text()
-    if (!text) return null
-    try {
-      return JSON.parse(text)
-    } catch {
-      throw new JiraError(`${what}: Jira answered with something that is not JSON`, { kind: 'json', status: res.status })
-    }
-  }
-  let detail = ''
+  if (res.status >= 200 && res.status < 300) return okBody(res, what)
+  throw errorFor(res, await bodyText(res), what)
+}
+
+/** A 2xx body as JSON (null when empty: a 204). */
+async function okBody(res, what) {
+  const text = await res.text()
+  if (!text) return null
   try {
-    detail = jiraMessage(await res.text())
+    return JSON.parse(text)
   } catch {
-    // The body is only for the message; a failed read keeps the status alone.
+    throw new JiraError(`${what}: Jira answered with something that is not JSON`, { kind: 'json', status: res.status })
   }
+}
+
+/** The body of an error answer, '' when it cannot be read (it is only for the message). */
+async function bodyText(res) {
+  try {
+    return await res.text()
+  } catch {
+    return ''
+  }
+}
+
+/** The JiraError for a status that is not 2xx, its body already read (`text`). */
+function errorFor(res, text, what) {
+  const detail = jiraMessage(text)
   const suffix = detail ? ` (${detail})` : ''
-  if (res.status === 401) throw authError()
+  if (res.status === 401) return authError()
   if (res.status === 403) {
-    throw new JiraError(`${what}: Jira says the token may not do this (403)${suffix}. A scoped token needs read:jira-work and read:jira-user.`, { kind: 'forbidden', status: 403 })
+    return new JiraError(`${what}: Jira says the token may not do this (403)${suffix}. A scoped token needs read:jira-work and read:jira-user.`, { kind: 'forbidden', status: 403 })
   }
-  if (res.status === 404) throw new JiraError(`${what}: not found (404)${suffix}`, { kind: 'notfound', status: 404 })
+  if (res.status === 404) return new JiraError(`${what}: not found (404)${suffix}`, { kind: 'notfound', status: 404 })
   if (res.status === 429) {
     const ra = Number(res.headers.get('retry-after'))
-    throw new JiraError(`Jira is rate limiting the plugin (429); it tries again at the next poll`, { kind: 'rate', status: 429, ...(Number.isFinite(ra) ? { retryAfter: ra } : {}) })
+    return new JiraError(`Jira is rate limiting the plugin (429); it tries again at the next poll`, { kind: 'rate', status: 429, ...(Number.isFinite(ra) ? { retryAfter: ra } : {}) })
   }
-  throw new JiraError(`${what}: Jira answered ${res.status}${suffix}`, { kind: 'http', status: res.status })
+  return new JiraError(`${what}: Jira answered ${res.status}${suffix}`, { kind: 'http', status: res.status })
+}
+
+/**
+ * POST `body` as JSON to `url` with the token, following no redirect: a 3xx ends the write with an
+ * error and nothing is sent again (see the top of this file). The same origin rule as guardedGet.
+ *
+ * @param {string} url absolute https URL; its origin must be in `trusted`
+ * @param {object} o
+ * @param {string} o.method 'POST'
+ * @param {unknown} o.body sent as JSON
+ * @param {string} o.auth
+ * @param {Set<string>} o.trusted
+ * @param {typeof fetch} o.fetch
+ * @param {string} o.what what the person reads in a message ("comment on ABC-1")
+ * @param {AbortSignal} [o.signal]
+ * @param {number} [o.timeoutMs]
+ * @returns {Promise<Response>} the response, never a 3xx (the caller reads it with readWrite)
+ */
+async function guardedWrite(url, o) {
+  const origin = httpsOrigin(url)
+  if (!origin || !o.trusted.has(origin)) {
+    throw new JiraError(`not sending the Jira token to ${safeHost(url)}: only to the Jira site or the Atlassian gateway over https`, { kind: 'unsafe' })
+  }
+  const ms = o.timeoutMs || TIMEOUT_MS
+  const timeout = AbortSignal.timeout(ms)
+  const signal = o.signal ? AbortSignal.any([o.signal, timeout]) : timeout
+  let res
+  try {
+    res = await o.fetch(url, {
+      method: o.method,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: o.auth },
+      body: JSON.stringify(o.body),
+      redirect: 'manual',
+      signal,
+    })
+  } catch (e) {
+    // A write that timed out or was cancelled may still have reached Jira: never "nothing happened".
+    if (timeout.aborted) throw new JiraError(`${o.what}: Jira did not answer within ${Math.round(ms / 1000)} s; it may or may not have been saved, check the issue in Jira`, { kind: 'timeout' })
+    if (o.signal && o.signal.aborted) throw new JiraError(`${o.what}: cancelled; it may or may not have been saved, check the issue in Jira`, { kind: 'network' })
+    throw new JiraError(`cannot reach ${safeHost(url)}: ${e && e.message ? e.message : e}`, { kind: 'network' })
+  }
+  // `opaqueredirect`: a fetch that hides a manual redirect's status (a browser's; Node's gives the 3xx).
+  if ((res.status >= 300 && res.status < 400) || res.type === 'opaqueredirect') {
+    if (res.body) await res.body.cancel().catch(() => {})
+    throw new JiraError(`${o.what}: Jira answered with a redirect${res.status ? ` (${res.status})` : ''}; a write is never sent on, so it was not made`, { kind: 'unsafe', status: res.status })
+  }
+  return res
+}
+
+/**
+ * The answer to a write as JSON (null for a 204), or its JiraError. 403 and 400 get the write's own
+ * words (design "Writing to Jira"): a token that may read but not write, and Jira's reason for
+ * refusing the body (a required field, a workflow condition), cut.
+ */
+async function readWrite(res, what) {
+  if (res.status >= 200 && res.status < 300) return okBody(res, what)
+  const text = await bodyText(res)
+  const detail = jiraMessage(text)
+  if (res.status === 403) {
+    throw new JiraError(`${what}: Jira says the token may not write here (403)${detail ? ` (${detail})` : ''}. A scoped token needs write:jira-work; your account also needs the permission in this project.`, { kind: 'forbidden', status: 403 })
+  }
+  if (res.status === 400) throw new JiraError(`${what}: Jira refused it (400)${detail ? `: ${detail}` : ', with no reason given'}`, { kind: 'http', status: 400 })
+  throw errorFor(res, text, what)
 }
 
 /** The 401 the design names: a token that expired or is wrong, and where to make a new one. */
@@ -196,4 +276,4 @@ function jiraMessage(text) {
   return ''
 }
 
-module.exports = { GATEWAY, JiraError, authError, basicAuth, guardedGet, readJson, readLimited, httpsOrigin, safeHost }
+module.exports = { GATEWAY, JiraError, authError, basicAuth, guardedGet, guardedWrite, readJson, readWrite, readLimited, httpsOrigin, safeHost, jiraMessage }

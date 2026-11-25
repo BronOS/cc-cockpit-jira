@@ -24,14 +24,20 @@ const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(b
  * attachment id to its bytes: the content URL answers 303 to the media host with a signed address,
  * as Jira Cloud does, and the media host serves the bytes only without the token (`mediaDelay`:
  * ms before it answers).
+ *
+ * Writes (0.8.0): `GET .../issue/<KEY>/transitions` answers `opts.transitions` (by key, else
+ * TRANSITIONS); `POST .../comment` and `POST .../transitions` are recorded in `writes` (method,
+ * path, body) and answer 201 / 204, or `opts.failComment` / `opts.failTransition` (a status) with
+ * Jira's error body. `opts.onWrite(w)` runs after each recorded write (a test moves the issue).
  */
 function fakeJira(opts = {}) {
   const calls = []
+  const writes = []
   const expected = 'Basic ' + Buffer.from(`${EMAIL}:${opts.token || TOKEN}`).toString('base64')
   const cloudId = fixture('tenant_info.json').cloudId
   async function fetch(url, init = {}) {
     const headers = init.headers || {}
-    calls.push({ url, auth: headers.Authorization, redirect: init.redirect })
+    calls.push({ url, auth: headers.Authorization, redirect: init.redirect, method: init.method || 'GET', body: init.body })
     if (opts.routes) {
       const r = await opts.routes(url, init)
       if (r) return r
@@ -70,6 +76,20 @@ function fakeJira(opts = {}) {
       if (jql.startsWith('project in')) return json(fixture('search-mentioned.json'))
       return json({ issues: [] })
     }
+    const w = rest.match(/^\/rest\/api\/3\/issue\/([A-Z0-9_]+-\d+)\/(comment|transitions)$/)
+    if (w && init.method === 'POST') {
+      const rec = { method: 'POST', key: w[1], what: w[2], body: JSON.parse(init.body) }
+      const fail = w[2] === 'comment' ? opts.failComment : opts.failTransition
+      if (fail) return json({ errorMessages: [`${w[2]} refused`], errors: w[2] === 'transitions' ? { resolution: 'Resolution is required.' } : {} }, fail)
+      writes.push(rec)
+      if (opts.onWrite) opts.onWrite(rec)
+      return w[2] === 'comment' ? json({ id: String(9000 + writes.length) }, 201) : new Response(null, { status: 204 })
+    }
+    if (w && w[2] === 'transitions') {
+      if (u.searchParams.get('expand') !== 'transitions.fields') return json({ errorMessages: ['expand missing'] }, 400)
+      const t = opts.transitions && (typeof opts.transitions === 'function' ? opts.transitions(w[1]) : opts.transitions[w[1]])
+      return json(t || TRANSITIONS)
+    }
     const m = rest.match(/^\/rest\/api\/3\/issue\/([A-Z0-9_]+-\d+)$/)
     if (m) {
       if (opts.fail && opts.fail[m[1]]) return json({ errorMessages: ['nope'] }, opts.fail[m[1]])
@@ -82,7 +102,16 @@ function fakeJira(opts = {}) {
     }
     return json({ errorMessages: ['not found'] }, 404)
   }
-  return { fetch, calls }
+  return { fetch, calls, writes }
+}
+
+/** A transitions answer as Jira gives it (expand=transitions.fields): two plain moves and one with a resolution screen. */
+const TRANSITIONS = {
+  transitions: [
+    { id: '21', name: 'Start progress', to: { name: 'In Progress', statusCategory: { key: 'indeterminate' } }, isAvailable: true, fields: {} },
+    { id: '31', name: 'Done', to: { name: 'Done', statusCategory: { key: 'done' } }, isAvailable: true, fields: { resolution: { required: false, name: 'Resolution', hasDefaultValue: false } } },
+    { id: '41', name: 'Resolve', to: { name: 'Resolved', statusCategory: { key: 'done' } }, isAvailable: true, fields: { resolution: { required: true, name: 'Resolution', hasDefaultValue: false } } },
+  ],
 }
 
 function tmpDir() {
@@ -161,8 +190,8 @@ function fakeCtx(opts = {}) {
       },
       show() {},
     },
-    async sendPanel(m) {
-      for (const fn of panelListeners) await fn(m)
+    async sendPanel(m, from) {
+      for (const fn of panelListeners) await fn(m, from)
     },
     overlay: {
       start(spec) {
@@ -172,17 +201,32 @@ function fakeCtx(opts = {}) {
         let close
         const result = opts.overlayWait ? new Promise((r) => (close = r)) : Promise.resolve(o.answer)
         o.close = (answer) => close && close(answer || { kind: 'dismissed' })
-        o.send = (m) => o.listeners.forEach((fn) => fn(structuredClone(m)))
+        o.send = (m, from) => o.listeners.forEach((fn) => fn(structuredClone(m), from))
+        // The toolbar (opts.noToolbar: an app without overlay buttons): `o.click(id, from)` is a
+        // click on one of the opener's buttons, `o.buttons` what setButtons last gave.
+        o.buttons = spec.buttons || []
+        o.buttonHandlers = {}
+        o.click = (id, from) => o.buttonHandlers[id](from)
+        const toolbar = opts.noToolbar
+          ? {}
+          : {
+              onButton: (id, fn) => ((o.buttonHandlers[id] = fn), () => {}),
+              setButtons: (b) => (o.buttons = structuredClone(b)),
+            }
         return {
+          ...toolbar,
           result,
           post: (m) => {
             if (JSON.stringify(m).length > 1040384) throw new Error('overlay message over 1,040,384 chars of JSON')
             o.posts.push(structuredClone(m))
+            // `opts.page(o, m)`: a fake page answering the host's posts (the reply page's acks).
+            if (opts.page) queueMicrotask(() => opts.page(o, structuredClone(m)))
           },
           onMessage: (fn) => (o.listeners.push(fn), () => {}),
           onDiscuss: (fn) => ((o.discuss = fn), () => {}),
           close() {
             o.closed = true
+            if (close) close({ kind: 'dismissed' })
           },
           focus() {},
         }
@@ -207,8 +251,8 @@ function fakeCtx(opts = {}) {
         return () => {}
       },
     },
-    async runCli(argv) {
-      return ctx.cliHandler(argv, { stdin: '', cwd: dataDir, signal: new AbortController().signal })
+    async runCli(argv, call = {}) {
+      return ctx.cliHandler(argv, { stdin: '', cwd: dataDir, signal: new AbortController().signal, ...call })
     },
     services: {
       use: (name) => {
@@ -305,4 +349,4 @@ function picture(type = 'png', size = 64) {
   return Buffer.concat([head, Buffer.alloc(Math.max(0, size - head.length), 7)])
 }
 
-module.exports = { fakeJira, fakeCtx, fakeTriage, fixture, tmpDir, picture, SITE, GATEWAY, MEDIA, EMAIL, TOKEN, ME, NOW, CONFIGURED }
+module.exports = { fakeJira, fakeCtx, fakeTriage, fixture, tmpDir, picture, SITE, GATEWAY, MEDIA, EMAIL, TOKEN, ME, NOW, CONFIGURED, TRANSITIONS }

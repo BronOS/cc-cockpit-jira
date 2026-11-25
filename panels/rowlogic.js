@@ -51,8 +51,12 @@ function rowClickOpens(inControl, selecting) {
  * The triage button is labelled with the verdict itself ("action ▾"), not "Wrong?": a new person
  * could not tell what was wrong; the label says what triage decided, the chooser asks the question.
  *
+ * Reply (0.8.0) opens the reply page (a comment, a status change); it is left out when the writes
+ * setting is off (`s.writes` false) and in a read-only guest's view (`s.readOnly`, the page's own
+ * ccPanel.view.access: a hint that only hides, the host checks the click's `from.access` itself).
+ *
  * @param {{ unread: boolean, canUnread: boolean, lane: string, verdict?: { priority: string } }} r
- * @param {{ triageOn: boolean }} s
+ * @param {{ triageOn: boolean, writes?: boolean, readOnly?: boolean }} s
  */
 function rowButtons(r, s) {
   const out = [{ action: 'browser', label: '↗', title: 'Open in the browser' }]
@@ -62,6 +66,7 @@ function rowButtons(r, s) {
     const p = r.verdict && r.verdict.priority
     out.push({ action: 'wrong', label: p ? `${p} ▾` : 'triage ▾', title: p ? `Triage says ${p}: change how much this needs you` : 'Not triaged yet: say how much this needs you' })
   }
+  if (s && s.writes && !s.readOnly) out.push({ action: 'reply', label: 'Reply', title: 'Comment or change the status (you post it)' })
   out.push({ action: 'discuss', label: 'Discuss', title: 'Send the issue to the Claude tab you are looking at' })
   out.push({ action: 'newSession', label: 'New', title: 'Open a new Claude tab about this issue' })
   return out

@@ -1,5 +1,6 @@
 'use strict'
-// The Jira Cloud REST v3 client: read-only GETs, paging, and the classic/scoped token choice.
+// The Jira Cloud REST v3 client: GETs, paging, the classic/scoped token choice, and since 0.8.0
+// its only writes, a comment and a transition (design "Writing to Jira"; lib/write.js has the rules).
 //
 // Two kinds of API token exist (design "Auth and settings"):
 // - classic: Basic email:token straight to the site (`https://x.atlassian.net/rest/api/3/...`);
@@ -11,7 +12,9 @@
 // gateway once. The kind that worked is kept for the client's life (in memory only: nothing
 // derived from the token is stored).
 
-const { GATEWAY, JiraError, authError, basicAuth, guardedGet, readJson, readLimited, httpsOrigin } = require('./http')
+const { GATEWAY, JiraError, authError, basicAuth, guardedGet, guardedWrite, readJson, readWrite, readLimited, httpsOrigin } = require('./http')
+const { checkComment, commentAdf, parseTransitions } = require('./write')
+const { issueKey } = require('./util')
 
 const SEARCH_PAGE = 100
 const COMMENT_PAGE = 100
@@ -214,9 +217,62 @@ function createClient(o) {
     return readLimited(res, o.maxBytes, `attachment ${sid}`)
   }
 
+  /**
+   * A write (POST) to a REST path on the client's own base. The token kind is settled by a read
+   * first when nothing settled it yet: a write is never the request that probes site vs gateway (an
+   * auto client retrying a write through the gateway after the site's 401 would be a second write
+   * attempt). No redirect is followed (guardedWrite).
+   */
+  async function post(path, body, what, signal) {
+    if (mode === null) await myself(signal)
+    const trusted = new Set([httpsOrigin(baseFor(mode))])
+    const res = await guardedWrite(baseFor(mode) + path, { method: 'POST', body, auth, trusted, fetch: fetchFn, what, signal })
+    return readWrite(res, what)
+  }
+
+  /** The key as it goes into a write's path: exactly an issue key (util.issueKey), else refused. */
+  function writeKey(key) {
+    const k = issueKey(key)
+    if (!k || k !== key) throw new JiraError(`not an issue key: "${String(key).slice(0, 40)}"`, { kind: 'unsafe' })
+    return k
+  }
+
+  /**
+   * Post a comment: plain text as ADF (lib/write.js commentAdf), at most 32,000 characters, refused
+   * before the call when empty or longer. Resolves `{ id }`.
+   */
+  async function comment(key, text, signal) {
+    const k = writeKey(key)
+    const c = checkComment(text)
+    if (c.error) throw new JiraError(`comment on ${k}: ${c.error}`, { kind: 'invalid' })
+    const body = await post(`/rest/api/3/issue/${k}/comment`, { body: commentAdf(c.text) }, `comment on ${k}`, signal)
+    return { id: body && body.id != null ? String(body.id) : '' }
+  }
+
+  /**
+   * The transitions possible now, with their fields (`expand=transitions.fields`), so one that needs
+   * a field without a default is known to be disabled (lib/write.js parseTransitions). Read fresh
+   * every time: workflows differ per project and per status.
+   */
+  async function transitions(key, signal) {
+    const k = writeKey(key)
+    return parseTransitions(await get(`/rest/api/3/issue/${k}/transitions`, { expand: 'transitions.fields' }, `transitions of ${k}`, signal))
+  }
+
+  /** Run a transition by id (digits only): `{ transition: { id } }`, no fields. */
+  async function transition(key, id, signal) {
+    const k = writeKey(key)
+    const sid = String(id)
+    if (!/^[0-9]{1,10}$/.test(sid)) throw new JiraError('a transition id is digits only', { kind: 'unsafe' })
+    await post(`/rest/api/3/issue/${k}/transitions`, { transition: { id: sid } }, `moving ${k}`, signal)
+  }
+
   return {
     get,
     search,
+    comment,
+    transitions,
+    transition,
     issue,
     issueHeader,
     myself,

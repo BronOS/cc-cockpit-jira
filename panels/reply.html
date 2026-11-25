@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Reply</title>
+    <!-- The reply page (0.8.0, design "The reply page"): a comment and/or a status change on one
+      issue, written only when the person clicks the one button (the app's overlay toolbar; this
+      page's own only on an app without toolbar buttons). The host reads the issue and its
+      transitions, posts them here, and does every write; the page keeps the person's words and
+      answers the host's `collect` with what it holds at the click. Every Jira text goes in through
+      textContent. The CSP runs no inline script: the logic is in replylogic.js and reply.js. -->
+    <script src="/__sdk/panel.js"></script>
+    <script src="replylogic.js" defer></script>
+    <script src="reply.js" defer></script>
+    <style>
+      body { margin: 0; padding: 12px 16px 16px; font: 13px/1.5 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+      button:hover { border-color: var(--cc-border-strong); }
+      button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 1px; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); }
+      button.primary:hover { background: var(--cc-accent-hover); }
+      button:disabled { opacity: 0.55; cursor: default; }
+      button.link { border: 0; background: none; padding: 0; color: var(--cc-accent); text-decoration: underline; }
+      #form { max-width: 820px; }
+      .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .key { font-family: ui-monospace, monospace; color: var(--cc-fg-muted); }
+      h1 { font-size: 15px; margin: 4px 0 12px; overflow-wrap: anywhere; }
+      .lozenge { display: inline-block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; padding: 0 5px; border-radius: 3px; background: var(--cc-surface-3); color: var(--cc-fg); }
+      .lozenge-info { background: color-mix(in srgb, #3b82f6 22%, transparent); color: color-mix(in srgb, #3b82f6 70%, var(--cc-fg)); }
+      .lozenge-success { background: color-mix(in srgb, #22c55e 22%, transparent); color: color-mix(in srgb, #22c55e 70%, var(--cc-fg)); }
+      .lozenge-warning { background: color-mix(in srgb, #f59e0b 24%, transparent); color: color-mix(in srgb, #f59e0b 70%, var(--cc-fg)); }
+      /* Who drafted it: a framed line with a bold word, not a colour alone (a tint is easy to miss). */
+      .marker { margin: 0 0 12px; padding: 6px 10px; border: 1px solid var(--cc-border-strong); border-left: 3px solid var(--cc-accent); border-radius: 4px; background: var(--cc-surface-1); }
+      .marker strong { font-weight: 700; }
+      .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+      .field label { font-weight: 600; }
+      select { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 6px; max-width: 100%; }
+      textarea { font: 13px/1.5 system-ui, sans-serif; color: inherit; background: var(--cc-bg-input, var(--cc-bg)); border: 1px solid var(--cc-border); border-radius: 4px; padding: 6px 8px; min-height: 180px; resize: vertical; box-sizing: border-box; width: 100%; }
+      .help { color: var(--cc-fg-muted); font-size: 12px; }
+      .count.over { color: var(--cc-status-ended); font-weight: 600; }
+      .line { padding: 6px 10px; border-radius: 4px; margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--cc-border); }
+      .line.error { background: var(--cc-bg-error); }
+      .line.info { background: var(--cc-bg-banner); }
+      ul.steps { list-style: none; margin: 0 0 12px; padding: 0; }
+      ul.steps li { padding: 2px 0; }
+      /* A step's outcome is a word and a mark, not only a colour. */
+      ul.steps .mark { display: inline-block; width: 1.4em; font-weight: 700; }
+      ul.steps .fail { color: var(--cc-status-ended); }
+      .own { display: flex; justify-content: flex-end; }
+      .muted { color: var(--cc-fg-muted); }
+    </style>
+  </head>
+  <body>
+    <div id="loading" class="muted">Reading the issue…</div>
+    <div id="failed" hidden>
+      <p class="line error" id="failedText"></p>
+      <button id="retry" type="button">Try again</button>
+    </div>
+    <div id="form" hidden>
+      <div class="head">
+        <span class="key" id="key"></span>
+        <span class="lozenge" id="status"></span>
+      </div>
+      <h1 id="summary"></h1>
+      <p id="marker" class="marker" hidden></p>
+      <p id="asked" class="line info" hidden></p>
+      <p id="message" class="line" hidden></p>
+      <ul id="steps" class="steps" hidden></ul>
+      <div class="field">
+        <label for="move">Move to</label>
+        <select id="move"></select>
+        <span class="help" id="needsFields" hidden>A move marked "needs fields" asks for more than a status (a resolution, a field): <button type="button" class="link" id="openJira">open it in Jira</button>.</span>
+        <span class="help" id="noMoves" hidden>No status change is possible from here.</span>
+      </div>
+      <div class="field">
+        <label for="comment">Comment</label>
+        <textarea id="comment" spellcheck="true" placeholder="Plain text. A blank line starts a new paragraph."></textarea>
+        <span class="help">Plain text: a blank line starts a paragraph, no formatting and no mentions. <span class="count" id="count"></span></span>
+      </div>
+      <div class="own" id="own" hidden>
+        <button id="send" type="button" class="primary" disabled>Post comment</button>
+      </div>
+    </div>
+  </body>
+</html>

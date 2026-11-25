@@ -48,3 +48,16 @@ test('the triage button says what triage decided, not "Wrong?"', () => {
   assert.match(t({ verdict: { priority: 'action' } }).title, /Triage says action/)
   assert.equal(t({}).label, 'triage ▾')
 })
+
+test('Reply (0.8.0): offered when writes are on, before Discuss; never with writes off or in a read-only view', () => {
+  const ids = (s) => rowButtons({ unread: false, canUnread: true, lane: 'backlog' }, { triageOn: false, ...s }).map((b) => b.action)
+  assert.deepEqual(ids({ writes: true }), ['browser', 'unread', 'reply', 'discuss', 'newSession'])
+  assert.deepEqual(ids({ writes: false }), ['browser', 'unread', 'discuss', 'newSession'])
+  assert.deepEqual(ids({}), ['browser', 'unread', 'discuss', 'newSession'], 'an older host sends no writes: no Reply')
+  assert.deepEqual(ids({ writes: true, readOnly: true }), ['browser', 'unread', 'discuss', 'newSession'])
+  // A Done issue can still get a comment (or be reopened).
+  assert.ok(rowButtons({ unread: false, canUnread: false, lane: 'done' }, { triageOn: true, writes: true }).some((b) => b.action === 'reply'))
+  const b = rowButtons({ unread: false, lane: 'backlog' }, { writes: true }).find((x) => x.action === 'reply')
+  assert.equal(b.label, 'Reply')
+  assert.ok(b.title)
+})

@@ -71,7 +71,23 @@ test('the manifest schema follows the app\'s rules: no regex, a top-level secret
   assert.deepEqual(Object.keys(token).sort(), ['description', 'format', 'title', 'type'])
   for (const [k, p] of Object.entries(schema.properties)) if (p.oneOf) assert.ok('default' in p, `${k} has a default`)
   assert.deepEqual(manifest.services, { provides: { jira: 1, 'inbox-feed': 2 }, uses: { triage: 1, reviewer: 1 } })
-  assert.ok(!manifest.contributes.cli[0].stdin, 'no stdin: it would apply to every subcommand')
+  // stdin only with stdinDash (0.8.0, `update ... -`): without it every subcommand would wait on an open pipe.
+  assert.equal(manifest.contributes.cli[0].stdin, true)
+  assert.equal(manifest.contributes.cli[0].stdinDash, true)
+  // writes: draft by default, the three modes, nothing else.
+  const writes = schema.properties.writes
+  assert.equal(writes.default, 'draft')
+  assert.deepEqual(writes.oneOf.map((o) => o.const), ['draft', 'direct', 'off'])
+  assert.equal(writes.title, 'What ccc jira update does', 'the off refusal names the setting by this title')
+  assert.match(token.description, /write:jira-work/)
+})
+
+test('writes: draft unless set to direct or off; an unknown value is draft (it writes nothing by itself)', () => {
+  const base = { site: 'https://acme.atlassian.net', email: 'me@example.com', apiToken: 't' }
+  assert.equal(readSettings(base).cfg.writes, 'draft')
+  assert.equal(readSettings({ ...base, writes: 'direct' }).cfg.writes, 'direct')
+  assert.equal(readSettings({ ...base, writes: 'off' }).cfg.writes, 'off')
+  assert.equal(readSettings({ ...base, writes: 'yolo' }).cfg.writes, 'draft')
 })
 
 test('mailSenders: the setting, else jira@<site host>; bad addresses are skipped with a problem', () => {

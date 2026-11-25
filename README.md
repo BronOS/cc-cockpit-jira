@@ -2,7 +2,9 @@
 
 `bronos.jira` shows your Jira Cloud issues in a cc-cockpit panel, in lanes, with unread marks,
 sorted by [Jev triage](https://github.com/BronOS/cc-cockpit-jev-triage), and hands an issue to Claude
-to discuss. It is **read-only towards Jira**: it never comments, transitions or edits.
+to discuss. Since 0.8.0 it writes two things to Jira, a **comment** and a **status change**, and only
+when you click on its reply page: Claude can draft one with `ccc jira update`, you post it (see
+"Writing to Jira"). Nothing else is ever edited.
 
 - **Lanes**: Backlog, In progress, Mentioned, On hold, Done (choose which ones in the settings).
 - **Unread**: Jira has no read state, so the plugin keeps its own. An issue is unread while someone
@@ -17,6 +19,8 @@ to discuss. It is **read-only towards Jira**: it never comments, transitions or 
 - **Discuss with Claude**: click a row and the issue opens in the reviewer overlay as a styled page
   (description, comments, attachments with their images), where you select text to add notes and
   press Discuss (the Claude tab you are looking at) or New session.
+- **Reply** (0.8.0): a comment and/or a status change from the reply page; `ccc jira update` drafts
+  one for you to post (the `writes` setting).
 - `ccc jira ...` from any tab of the project.
 - **For other plugins** (0.5.0): the `jira` service tells them an issue's status and shows the issue
   in their own views. The [Gmail plugin](https://github.com/BronOS/cc-cockpit-gmail) uses it for Jira
@@ -41,8 +45,10 @@ to discuss. It is **read-only towards Jira**: it never comments, transitions or 
 1. Sign in at <https://id.atlassian.com/manage-profile/security/api-tokens>
    (id.atlassian.com > Security > API tokens).
 2. Either **Create API token** (a classic token: it can do what your account can), or **Create
-   API token with scopes** (recommended): pick the Jira app and the read-only scopes
-   **`read:jira-work`** and **`read:jira-user`**; nothing else is needed.
+   API token with scopes** (recommended): pick the Jira app and the scopes **`read:jira-work`** and
+   **`read:jira-user`**, plus **`write:jira-work`** for comments and status changes (Reply,
+   `ccc jira update`). Without it the plugin reads as before and a write says the token may not
+   write (403); with `writes` off nothing asks for it.
 3. Copy the token (it is shown once) and enter it in cc-cockpit: **Settings > This project > Jira >
    API token**. It is stored encrypted in the OS keychain; `ccc plugin config` cannot set it.
 
@@ -76,6 +82,7 @@ Settings > This project > Jira, or from a tab: `ccc plugin config bronos.jira <k
 | `mentionProjects` | `[]` | project keys searched for mentions; empty: the projects of your assigned issues |
 | `pollMinutes` | 3 | only while the project's window is open |
 | `triageText` | `full` | `full` or `summary` (see Privacy) |
+| `writes` | `draft` | "What ccc jira update does": `draft` (Claude drafts, I post), `direct` (ccc writes directly) or `off` (read-only: no Reply, the command refused); see "Writing to Jira" |
 | `mailSenders` | `[]` | addresses Jira's notification mails come from, for other plugins (Gmail); empty: `jira@<your site's host>` |
 
 ```sh
@@ -101,7 +108,8 @@ stays in its own lane, marked unread. Issues are read in full only when their `u
 **Click a row** (or press Enter on it) to open the issue (see below); opening marks it read only with `markReadOnOpen` on. The
 other actions are small buttons that show while the pointer is over a row or the row has the
 keyboard focus: **↗** (the issue in your browser), **Read / Unread**, the triage verdict (**action ▾**: change how much
-the issue needs you; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel), **Discuss**
+the issue needs you; to record why, for jev-triage's eval, use Wrong? in the Jev triage panel), **Reply**
+(the reply page: a comment or a status change; not shown with `writes` off), **Discuss**
 (sends the issue to the Claude tab you are looking at; with several tabs and no way to tell, you
 pick one) and **New** (a new Claude session about it). Keyboard: Tab to a row, ↑ / ↓ (Home / End)
 move between rows, Enter or Space opens, Tab goes on to the row's buttons.
@@ -144,6 +152,61 @@ token), newest attachment first, within these limits:
 A bigger image, the 16th, or one that did not arrive in time is a link. Downloads that were still
 running finish into the cache, so the next open shows them. The page is at most 2 MB of HTML: when
 a very long thread does not fit, the oldest comments give way, with a line saying how many.
+
+## Writing to Jira
+
+Since 0.8.0 the plugin writes a **comment** and a **status change** (a workflow transition) to one
+issue, together or alone, and nothing else (no fields, assignee, mentions, restricted comments or a
+transition's own screen fields).
+
+**The reply page.** Opened by the row's **Reply** button (hover, like Discuss), by **Reply** in the
+toolbar of an issue overlay (the ones this plugin or its reviewer opened, as Mark read), and by
+`ccc jira update` in draft mode. One page per issue: Reply on an issue whose page is open brings it to
+the front. It shows the key, summary and current status, **Move to** (Keep status, then the moves
+Jira allows from this status, read fresh each time the page opens; one that needs fields, such as a
+resolution screen, is listed but disabled: open it in Jira) and the comment box. The comment is plain
+text: a blank line starts a paragraph, a single line break stays a line break, nothing is formatting,
+no mentions, at most 32,000 characters. One button in the overlay's toolbar, its label from what you
+chose: **Post comment**, **Move**, or **Post and move**; disabled while nothing would happen. No
+keyboard shortcut posts: the click is the decision.
+
+When you click, the moves are read again first: if the one you chose is gone (someone moved the issue
+meanwhile) or the status is no longer the one shown, nothing is written, the comment neither, and
+the list refreshes. Then the comment is posted, then the move, each reported on its own: a refused
+move after a posted comment says so, clears the box (the comment is in Jira) and keeps your status
+choice for a retry. On success the page closes and the panel says what was done. Afterwards the issue
+is read again, its seen mark moves past your own change (it never shows as unread), and Inbox hears it.
+
+**`ccc jira update <KEY> [--status <name>] [-]`.** The comment on stdin with `-`, the status by
+transition name or target status name, any letter case; either may be left out, not both. What it does
+follows the project's **`writes`** setting ("What ccc jira update does"), read on every call:
+
+| `writes` | |
+|---|---|
+| `draft` (default, "Claude drafts, I post") | opens the reply page filled in and answers at once: `Draft opened for ABC-1: the person posts it.` Nothing is written until you click. A status that matches no move (or a disabled one) opens the page with Keep status and a line naming what was asked and what is possible; the answer says so too. A page marks a draft "Draft from Claude (tab name)" when a Claude tab ran the command (the app's own word), else "Draft from ccc". When the issue's page is open and you have not touched it, the draft replaces it; once you edited it, the draft is refused and your page left alone. |
+| `direct` ("ccc writes directly") | writes, comment then move, and prints each step; an unknown or disabled status is refused before anything is written, with the possible ones. |
+| `off` ("Read-only") | refused: "writing is off for this project"; the panel offers no Reply either. |
+
+Exit 0 when written or the draft opened, 1 when refused or failed. Why the setting lives in the
+plugin and not in Claude's permissions: issue text reaches Claude (Discuss, `ccc jira show`, triage),
+so a description can say "close this ticket"; a skill is advice that text competes with, and Claude
+Code's permission rules are walked around by a script and skipped in auto modes. The plugin reads the
+setting for every caller (a Claude tab, your shell, a script), so the rule is "ccc drafts, the page
+writes". It is not a security boundary (Claude runs as your OS user); it keeps a prompt-injected Claude
+from writing to Jira unseen. A per-project `Bash(ccc jira update:*)` ask rule is a good extra layer.
+
+**Guests.** The plugin is hidden from guests unless you show it; even then a read-only guest gets no
+Reply, and every click that writes is checked against the access the app reports for it (owner or a
+write guest).
+
+**Safety.** Writes go to the same place as reads (your site, or the gateway for a scoped token),
+https only, and never follow a redirect: a redirected write is an error and nothing is sent again. A
+403 says the token may not write (a scoped token needs `write:jira-work`); a 400 shows Jira's reason.
+The `jira` service other plugins use has no write methods.
+
+Needs cc-cockpit 0.10.1 or later for `ccc jira update ... -` alone to read stdin (`stdinDash`; an
+older app reads stdin for every `ccc jira` call, bounded by ccc's own deadline). The one button in the
+toolbar needs an app with overlay toolbar buttons; an older one shows it at the foot of the page.
 
 ## The jira service
 
@@ -208,6 +271,8 @@ ccc jira list [lane]       backlog, inProgress, mentioned, onHold, done
 ccc jira show <KEY>        the issue as readable text, new activity marked [new]
 ccc jira read <KEY>        mark read
 ccc jira unread <KEY>      mark unread
+ccc jira update <KEY> [--status <name>] [-]
+                           a comment (stdin, with -) and/or a status change; see "Writing to Jira"
 ccc jira help
 ```
 

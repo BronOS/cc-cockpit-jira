@@ -1,5 +1,6 @@
 'use strict'
-// bronos.jira: your Jira Cloud issues in lanes, sorted by jev-triage, read-only towards Jira.
+// bronos.jira: your Jira Cloud issues in lanes, sorted by jev-triage; since 0.8.0 a comment and a
+// status change from the reply page (section "writing to Jira" below; design "Writing to Jira").
 // Plain JavaScript with no build step; the pure logic is in ./lib (node:test suites in test/).
 // Design: docs/design.md. The app API: `ccc guide api` (this file uses only what it documents).
 //
@@ -12,7 +13,7 @@ const { readSettings, connectionKey, missingText, mailSendersOf } = require('./l
 const { createClient } = require('./lib/client')
 const { compact, attachmentsOf, header } = require('./lib/model')
 const { poll, buildView, allRows, loadCache } = require('./lib/poll')
-const { loadSeen, seed, markRead, markUnread, emptySeen } = require('./lib/seen')
+const { loadSeen, seed, markRead, markUnread, emptySeen, bound } = require('./lib/seen')
 const { triageItem, mentionedBy } = require('./lib/triage')
 const { readableText, browseUrl, discussPrompt } = require('./lib/readable')
 const { pickTab, openerArgv, isMissingAnnotate } = require('./lib/actions')
@@ -25,6 +26,9 @@ const svc = require('./lib/service')
 const feed = require('./lib/feed')
 const { headerSpec } = require('./lib/header')
 const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_CHARS, WAIT_MS } = require('./lib/images')
+const wr = require('./lib/write')
+// The reply page's own decisions (a classic script the page loads too): the toolbar's label follows them.
+const { replyAction, keepChoice } = require('../panels/replylogic')
 const path = require('node:path')
 
 const PANEL = 'main'
@@ -48,6 +52,10 @@ const IMAGE_TIMEOUT_MS = 20000 // one attachment download, redirects and body in
 // The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON
 // (`ccc guide panels`), and JSON can double a string (quotes, backslashes).
 const PAGE_HTML_PART = 400000
+// The reply page (0.8.0): how long a CLI draft waits for the page to read the issue and take the
+// draft (the answer comes before ccc's 30 s), and how long a toolbar click waits for the page's values.
+const DRAFT_WAIT_MS = 20000
+const PAGE_ANSWER_MS = 5000
 
 let instance = null
 
@@ -91,6 +99,9 @@ function start(ctx, io = {}) {
   }
 
   const cfg = () => S.settings.cfg
+  // Writing to Jira (0.8.0): the open reply pages by issue key (openReply), and whether writes are on.
+  const replies = new Map()
+  const writesOn = () => cfg().writes !== 'off'
 
   // ---- stored state ----
 
@@ -305,6 +316,11 @@ function start(ctx, io = {}) {
       S.error = null
     }
     if (connectionKey(before) !== connectionKey(after)) S.client = null
+    // Writing turned off, or another site or account: an open reply page would write where the
+    // person no longer means to. Closed (its text was the person's to post; nothing was written).
+    if (after.writes === 'off' || before.site !== after.site || before.email !== after.email || connectionKey(before) !== connectionKey(after)) {
+      for (const page of replies.values()) closeQuietly(page.handle)
+    }
     // The service's answers belong to the old site or account (and the senders may have changed).
     lookups.clear()
     if (S.settings.ready) reschedule()
@@ -522,7 +538,25 @@ function start(ctx, io = {}) {
         throw new Error(r.message)
       }
     }
-    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
+    const out = item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
+    // Reply (0.8.0): the reply page above this overlay, unless writing is off. The click's `from`
+    // (the app's word) must be the owner or a write guest; the setting is read again at the click.
+    if (writesOn()) {
+      out.push({
+        id: 'reply',
+        label: 'Reply',
+        run: async (_info, from) => {
+          if (!mayWriteOrNotice(from)) throw new Error('only the owner or a guest with write access can reply')
+          try {
+            await openReply(item.id)
+          } catch (e) {
+            setNotice(e && e.message ? e.message : String(e), 'error')
+            throw e
+          }
+        },
+      })
+    }
+    return out
   }
 
   /** What Discuss with Claude sends for an issue overlay: key and summary, status and the latest comment, capped. */
@@ -839,6 +873,397 @@ function start(ctx, io = {}) {
   }
 
 
+  // ---- writing to Jira (0.8.0; design "Writing to Jira") ----
+  //
+  // A comment and/or a status change on one issue, made only on the reply page (panels/reply.html),
+  // one page per issue, by the person's click. `ccc jira update` prepares a page (writes: draft, the
+  // default) or writes itself (direct) or is refused (off); the setting is read on every call, for
+  // every caller, here in the host: a description can tell Claude to close the ticket, and a skill or
+  // a permission rule on Claude's side can be walked around. Every click that writes is checked
+  // against the app's `from.access` (owner or write guest). The pure rules are in lib/write.js.
+
+  function mayWriteOrNotice(from) {
+    if (wr.mayWrite(from)) return true
+    setNotice('Only the owner or a guest with write access can write to Jira.', 'error')
+    return false
+  }
+
+  /** `p`, or `fallback` after `ms` (a wait that must not hold a CLI answer or a click forever). */
+  function settleWithin(p, ms, fallback) {
+    let timer
+    return Promise.race([p, new Promise((r) => (timer = setTimeout(r, ms, fallback)))]).finally(() => clearTimeout(timer))
+  }
+
+  function postReply(page, m) {
+    if (page.closed) return
+    try {
+      page.handle.post(m)
+    } catch (e) {
+      ctx.log.warn(`reply page ${page.key}: ${e && e.message ? e.message : e}`)
+    }
+  }
+
+  /** The toolbar's one button, its label from the page's current values (replylogic.replyAction). */
+  function updateButton(page) {
+    if (!page.toolbar || page.closed) return
+    const a = replyAction(page.form.comment, page.form.transitionId)
+    const spec = [{ id: 'send', label: a.label, primary: true, disabled: a.disabled || !page.loaded || page.busy, ...(page.busy ? { busy: true } : {}) }]
+    const json = JSON.stringify(spec)
+    if (json === page.button) return
+    page.button = json
+    try {
+      page.handle.setButtons(spec)
+    } catch (e) {
+      ctx.log.warn(`reply page buttons: ${e && e.message ? e.message : e}`)
+    }
+  }
+
+  /** The transitions as the page lists them (plain data; the page builds the options with replylogic.moveOption). */
+  const pageTransitions = (list) => list.map((t) => ({ id: t.id, name: t.name, to: t.to, enabled: t.enabled, why: t.why }))
+
+  /**
+   * Read the issue's header and its transitions for the page (each time the page opens or a draft
+   * replaces its content: workflows differ per project and status) and post them. With `fill` (a
+   * draft, or the empty form of a Reply click) the page replaces its fields and answers `filled`;
+   * one the person typed into since the last fill keeps its words and answers `applied: false`
+   * (the race of a draft arriving while they type), which counts as edited.
+   * Resolves `{ ok, applied, asked, error }`; never rejects.
+   */
+  async function loadReply(page, fill) {
+    const key = page.key
+    let head
+    let transitions
+    try {
+      await ready
+      ;[head, transitions] = await Promise.all([client().issueHeader(key, abort.signal), client().transitions(key, abort.signal)])
+    } catch (e) {
+      const message = e && e.message ? e.message : String(e)
+      postReply(page, { type: 'loadError', key, message: cut(oneLine(message), 400) })
+      return { ok: false, error: message }
+    }
+    const h = header(head.key, head.fields)
+    page.status = h.status
+    page.tone = wr.toneOf(h.category)
+    page.transitions = transitions
+    page.loaded = true
+    let asked = ''
+    let n = null
+    let form = null
+    if (fill) {
+      let transitionId = ''
+      if (fill.status) {
+        const m = wr.matchStatus(transitions, fill.status)
+        if (m.transition) transitionId = m.transition.id
+        else asked = wr.statusProblem(m, fill.status, transitions)
+      }
+      n = ++page.seq
+      form = { comment: fill.comment || '', transitionId, marker: fill.marker || '', asked: asked ? `Asked to move: ${asked}` : '', n }
+    } else {
+      page.form.transitionId = keepChoice(transitions, page.form.transitionId)
+    }
+    const acked = n !== null ? waitFor(page, n) : null
+    postReply(page, {
+      type: 'issue',
+      key,
+      summary: h.summary,
+      status: h.status,
+      tone: wr.toneOf(h.category),
+      url: browseUrl(cfg().site, key),
+      transitions: pageTransitions(transitions),
+      toolbar: page.toolbar,
+      max: wr.MAX_COMMENT,
+      ...(form ? { fill: form } : { keep: page.form.transitionId }),
+    })
+    let applied = true
+    if (acked) {
+      // A page that never answers (it did not load) took nothing the person could have edited.
+      const ack = await settleWithin(acked, DRAFT_WAIT_MS, { applied: true, late: true })
+      applied = !(ack && ack.applied === false)
+      if (applied) page.form = { comment: form.comment, transitionId: form.transitionId }
+      else page.edited = true
+    }
+    updateButton(page)
+    return { ok: true, applied, asked }
+  }
+
+  /** A promise for the page's answer number `n` (`filled`, `values`); null when the page closes first. */
+  function waitFor(page, n) {
+    return new Promise((resolve) => page.waiting.set(n, resolve))
+  }
+  function answer(page, n, value) {
+    const w = page.waiting.get(n)
+    if (!w) return false
+    page.waiting.delete(n)
+    w(value)
+    return true
+  }
+
+  /**
+   * The reply page of `key`: focused when it is open (a Reply click), else opened. With `draft`
+   * (`ccc jira update` in draft mode: `{ comment, status, marker }`) an open page the person has
+   * not touched gets the draft instead of its content; one they edited (or are posting) is left
+   * alone and the draft refused (wr.draftDecision). Resolves `{ decision, load }`, `load` the
+   * page's read of the issue (loadReply); throws when the plugin is not set up, writing is off, or
+   * the app refused the overlay.
+   */
+  async function openReply(key, draft) {
+    await ready
+    if (!S.settings.ready) throw notConfigured()
+    if (!writesOn()) throw new Error(wr.OFF_MESSAGE)
+    const existing = replies.get(key) || null
+    if (existing && !draft) {
+      existing.handle.focus()
+      return { decision: 'focus', load: existing.loading }
+    }
+    if (draft) {
+      const d = wr.draftDecision(existing)
+      if (d === 'refuse') return { decision: 'refuse' }
+      if (d === 'replace') {
+        existing.handle.focus()
+        existing.loading = loadReply(existing, draft)
+        return { decision: 'replace', load: existing.loading }
+      }
+    }
+    const row = rowOf(key)
+    const summary = row && row.issue.summary ? `: ${cut(oneLine(row.issue.summary), 70)}` : ''
+    // Open first, read after (`ready: 'manual'`): the page drops its loader once it drew the issue.
+    // No `type`: a reply page is no issue overlay, so no item buttons or Discuss land on it.
+    const handle = ctx.overlay.start({
+      kind: 'html',
+      file: 'panels/reply.html',
+      title: `Reply to ${key}${summary}`,
+      size: 'default',
+      ready: 'manual',
+      discuss: false,
+      buttons: [{ id: 'send', label: 'Post comment', primary: true, disabled: true }],
+    })
+    const page = {
+      key,
+      handle,
+      // An app with overlay toolbar buttons gets the one button there (the style guide: an overlay has
+      // one action bar, the app's); an older one, the page's own.
+      toolbar: typeof handle.onButton === 'function' && typeof handle.setButtons === 'function',
+      form: { comment: '', transitionId: '' },
+      transitions: [],
+      status: '',
+      tone: 'neutral',
+      loaded: false,
+      edited: false,
+      busy: false,
+      closed: false,
+      seq: 0,
+      waiting: new Map(),
+      button: null,
+      loading: null,
+    }
+    replies.set(key, page)
+    const end = () => {
+      page.closed = true
+      if (replies.get(key) === page) replies.delete(key)
+      for (const w of page.waiting.values()) w(null)
+      page.waiting.clear()
+    }
+    handle.result.then(end, end)
+    if (page.toolbar) handle.onButton('send', (from) => sendFromToolbar(page, from))
+    handle.onMessage((m, from) => onReplyMessage(page, m, from))
+    page.loading = loadReply(page, draft || { comment: '', status: null, marker: '' })
+    const refused = await overlayRefusal(handle)
+    if (refused) {
+      end()
+      throw new Error(`Cannot open the reply page: ${refused.message}`)
+    }
+    return { decision: 'open', load: page.loading }
+  }
+
+  function onReplyMessage(page, m, from) {
+    if (!m || typeof m !== 'object' || page.closed) return
+    switch (m.type) {
+      case 'edit':
+        // The person typed or chose: from now on a draft from ccc never replaces this page.
+        page.edited = true
+        page.form = { comment: typeof m.comment === 'string' ? m.comment : '', transitionId: typeof m.transitionId === 'string' ? m.transitionId : '' }
+        return updateButton(page)
+      case 'filled':
+        if (Number.isInteger(m.n)) answer(page, m.n, { applied: m.applied !== false })
+        return
+      case 'values':
+        if (Number.isInteger(m.n)) answer(page, m.n, m)
+        return
+      case 'submit':
+        // The page's own button, only on an app without toolbar buttons (else the toolbar is the one button).
+        if (!page.toolbar) return void send(page, m, from)
+        return
+      case 'browser':
+        return void openBrowser(page.key).catch((e) => setNotice(e.message, 'error'))
+      case 'reload':
+        if (!page.busy) page.loading = loadReply(page, page.loaded ? null : { comment: page.form.comment, status: null, marker: '' })
+        return
+    }
+  }
+
+  /**
+   * The toolbar's button: the click is the decision, so what is written is what the page holds at
+   * that moment, asked from the page (its `edit` messages could still be on the way), not the last
+   * copy the host saw. A page that does not answer writes nothing.
+   */
+  async function sendFromToolbar(page, from) {
+    if (!wr.mayWrite(from)) return postReply(page, { type: 'error', message: 'Only the owner or a guest with write access can post.' })
+    const n = ++page.seq
+    const got = waitFor(page, n)
+    postReply(page, { type: 'collect', n })
+    const values = await settleWithin(got, PAGE_ANSWER_MS, null)
+    if (!values) return postReply(page, { type: 'error', message: 'The page did not answer; nothing was written. Try again.' })
+    return send(page, values, from)
+  }
+
+  /**
+   * Write what the page holds: the comment, then the move (lib/write.js performWrite: the
+   * transitions read again first; a move that is gone or a status that changed writes nothing).
+   * The values come from our own page, but are checked as input: a comment within the limit, a
+   * transition id we listed and that is enabled.
+   */
+  async function send(page, values, from) {
+    if (page.busy || page.closed) return
+    const fail = (message) => postReply(page, { type: 'error', message: cut(oneLine(message), 600) })
+    if (!wr.mayWrite(from)) return fail('Only the owner or a guest with write access can post.')
+    if (!writesOn()) return fail(`Not posted: ${wr.OFF_MESSAGE}.`)
+    if (!page.loaded) return fail(`${page.key} is not read yet; nothing was written.`)
+    const rawComment = typeof values.comment === 'string' ? values.comment : ''
+    const transitionId = typeof values.transitionId === 'string' ? values.transitionId : ''
+    let comment = ''
+    if (rawComment.trim()) {
+      const c = wr.checkComment(rawComment)
+      if (c.error) return fail(`Not posted: ${c.error}.`)
+      comment = c.text
+    }
+    if (transitionId && !page.transitions.some((t) => t.id === transitionId && t.enabled)) return fail('That move is not in the list any more; choose again. Nothing was written.')
+    if (!comment && !transitionId) return fail('Nothing to post: write a comment or choose a status.')
+    page.busy = true
+    updateButton(page)
+    postReply(page, { type: 'busy', on: true })
+    try {
+      const r = await wr.performWrite({ client: client(), key: page.key, comment, transitionId, expectStatus: transitionId ? page.status : undefined, signal: abort.signal })
+      if (r.moved) {
+        page.transitions = r.transitions || page.transitions
+        if (r.status !== undefined) {
+          page.status = r.status
+          page.tone = wr.toneOf(r.category)
+        }
+        page.form.transitionId = keepChoice(page.transitions, transitionId)
+        postReply(page, { type: 'transitions', status: page.status, tone: page.tone, transitions: pageTransitions(page.transitions), keep: page.form.transitionId, message: r.error })
+        return
+      }
+      if (!r.steps.length) return fail(r.error || 'Nothing was written.')
+      const commentPosted = r.steps.some((x) => x.step === 'comment' && x.ok)
+      if (r.steps.some((x) => x.ok)) await afterWrite(page.key)
+      const lines = wr.stepLines(page.key, r.steps)
+      if (r.ok) {
+        setNotice(lines.join('. ') + '.')
+        page.busy = false
+        closeQuietly(page.handle)
+        return
+      }
+      // Partial or failed: each step says how it went; a posted comment leaves the box (it is in
+      // Jira now), the status choice stays for a retry, against a fresh list.
+      if (commentPosted) page.form.comment = ''
+      if (r.steps.some((x) => x.ok)) {
+        try {
+          const [head, list] = await Promise.all([client().issueHeader(page.key, abort.signal), client().transitions(page.key, abort.signal)])
+          const fresh = header(head.key, head.fields)
+          page.status = fresh.status
+          page.tone = wr.toneOf(fresh.category)
+          page.transitions = list
+        } catch (e) {
+          ctx.log.warn(`re-reading ${page.key} after a partial write: ${e && e.message ? e.message : e}`)
+        }
+      }
+      page.form.transitionId = keepChoice(page.transitions, transitionId)
+      postReply(page, { type: 'result', steps: r.steps, lines, clearComment: commentPosted, status: page.status, tone: page.tone, transitions: pageTransitions(page.transitions), keep: page.form.transitionId })
+    } catch (e) {
+      fail(e && e.message ? e.message : String(e))
+    } finally {
+      page.busy = false
+      postReply(page, { type: 'busy', on: false })
+      updateButton(page)
+    }
+  }
+
+  /**
+   * After a write: the issue read again (the cache and the lists the lanes are built from), its seen
+   * mark moved to its new `updated` (the person's own change is never unread; unread already ignores
+   * their own comments, and a status change of theirs is theirs too), the feed told, triage asked
+   * again, and a poll for what the change moved (a Done issue's lane). A failed read is logged: the
+   * write itself happened, the next poll catches up. The person's own Mark unread flag stays.
+   */
+  async function afterWrite(key) {
+    try {
+      if (!S.cache) await loadSiteState()
+      if (!S.cache.me) S.cache.me = await client().myself(abort.signal)
+      const raw = await client().issue(key, abort.signal)
+      const fresh = header(raw.key, raw.fields)
+      for (const name of ['assigned', 'done', 'candidates']) {
+        const list = S.lists && S.lists[name]
+        if (!Array.isArray(list)) continue
+        const i = list.findIndex((x) => x.key === key)
+        // closedAt comes from the Done search's own fields, which a full read does not ask for.
+        if (i >= 0) list[i] = { ...fresh, closedAt: fresh.closedAt || list[i].closedAt || 0 }
+      }
+      if (rowOf(key) || S.cache.issues[key]) S.cache.issues[key] = compact(raw, S.cache.me.accountId)
+      if (S.seen) {
+        S.seen.marks[key] = Math.max(S.seen.marks[key] || 0, fresh.updatedAt || now())
+        bound(S.seen)
+      }
+      await Promise.all([saveCache(), S.seen ? saveSeen() : null])
+    } catch (e) {
+      ctx.log.warn(`reading ${key} again after the write failed: ${e && e.message ? e.message : e}`)
+    }
+    // The service's cached answers may name the old status.
+    lookups.clear()
+    rebuild()
+    postState()
+    emitFeed()
+    void classifyChanged()
+    void pollNow('write')
+  }
+
+  /**
+   * `ccc jira update` once cli.js parsed and checked it: the setting read again here (a change since
+   * cli.js asked counts), then the draft page or the direct write. `{ code, text }`.
+   */
+  async function cliUpdate(key, o) {
+    const mode = cfg().writes
+    if (mode === 'off') return { code: 1, text: wr.OFF_MESSAGE }
+    if (mode === 'draft') {
+      let tab = null
+      if (o.tabId) tab = (await ctx.sessions.list().catch(() => [])).find((t) => t && t.tabId === o.tabId) || null
+      const r = await openReply(key, { comment: o.comment || '', status: o.status || null, marker: wr.draftMarker(o.tabId, tab) })
+      const editing = `The person is editing a reply to ${key}: their page was left alone and this draft was not opened. Nothing was written.`
+      if (r.decision === 'refuse') return { code: 1, text: editing }
+      const loaded = await settleWithin(r.load, DRAFT_WAIT_MS, { ok: true, late: true })
+      if (loaded && loaded.applied === false) return { code: 1, text: editing }
+      const lines = [`Draft opened for ${key}: the person posts it.`]
+      if (loaded && loaded.asked) lines.push(`The status was left at Keep status: ${loaded.asked}`)
+      if (loaded && loaded.error) lines.push(`The page could not read ${key} from Jira: ${oneLine(loaded.error)}`)
+      if (loaded && loaded.late) lines.push('The page is still reading the issue.')
+      lines.push('Nothing was written: the person decides on the page. Do not run this again to post it.')
+      return { code: 0, text: lines.join('\n') }
+    }
+    // direct: an unknown or disabled status is refused before anything is written.
+    let transitionId = ''
+    let fresh
+    if (o.status) {
+      fresh = await client().transitions(key, o.signal)
+      const m = wr.matchStatus(fresh, o.status)
+      if (!m.transition) return { code: 1, text: `${key}: ${wr.statusProblem(m, o.status, fresh)} Nothing was written.` }
+      transitionId = m.transition.id
+    }
+    const comment = o.comment ? wr.checkComment(o.comment).text || '' : ''
+    const r = await wr.performWrite({ client: client(), key, comment, transitionId, fresh, signal: o.signal })
+    if (r.steps.some((x) => x.ok)) await afterWrite(key)
+    const lines = r.steps.length ? wr.stepLines(key, r.steps) : [`${key}: ${r.error || 'nothing was written'}`]
+    return { code: r.ok ? 0 : 1, text: lines.join('\n') }
+  }
+
   // ---- the jira service (v1; design "The jira service") ----
   //
   // Other plugins of this project (bronos.gmail: is this mail about a Done issue? the issue below the
@@ -1135,6 +1560,8 @@ function start(ctx, io = {}) {
       deferred: S.stats ? S.stats.deferred : 0,
       triage: { on: tOn, error: tOn ? S.triageError : null },
       annotate: annotateOn(),
+      // The rows' Reply button (0.8.0): not offered when the writes setting is off.
+      writes: S.settings.ready && writesOn(),
       notice: S.notice,
       choose: S.choose,
       unread: S.view.unread,
@@ -1205,7 +1632,7 @@ function start(ctx, io = {}) {
   // "just now" turns into "5 min ago" with nothing else happening.
   const headerTimer = coreHeader ? (io.setInterval || setInterval)(setHeader, 60000) : null
 
-  ctx.panels.onMessage(PANEL, async (m) => {
+  ctx.panels.onMessage(PANEL, async (m, from) => {
     if (!m || typeof m !== 'object') return
     // The page is ours, but its key still goes into a URL path and a Jira request: checked.
     const key = typeof m.key === 'string' ? issueKey(m.key) : null
@@ -1253,6 +1680,10 @@ function start(ctx, io = {}) {
           return await wrong(key, m.priority)
         case 'undoWrong':
           return await undoWrong(key)
+        case 'reply':
+          // `from` is the app's word on who clicked: a read guest never writes, whatever the page drew.
+          if (!mayWriteOrNotice(from)) return
+          return void (await openReply(key))
       }
     } catch (e) {
       ctx.log.warn(`panel ${m.type} ${key || ''}: ${e && e.message ? e.message : e}`)
@@ -1277,6 +1708,7 @@ function start(ctx, io = {}) {
       lastPoll: S.lastPoll,
       polling: Boolean(S.polling),
       pollMinutes: c.pollMinutes,
+      writes: c.writes,
       counts: S.lists ? S.view.lanes.map((l) => ({ title: l.title, total: l.rows.length, unread: l.id === 'done' ? 0 : l.rows.filter((r) => r.unread).length })) : null,
       triage: triageOn() ? (S.triageError ? `error: ${S.triageError}` : 'on (bronos.jev-triage)') : 'off: install and enable Jev triage (bronos.jev-triage) to sort the lanes',
       annotate: annotateOn()
@@ -1315,6 +1747,8 @@ function start(ctx, io = {}) {
         },
         read: (key) => setRead(key, true),
         unread: (key) => setRead(key, false),
+        writes: () => cfg().writes,
+        update: (key, o) => cliUpdate(key, o),
       },
       call,
     )

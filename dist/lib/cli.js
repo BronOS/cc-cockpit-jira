@@ -1,13 +1,16 @@
 'use strict'
 // `ccc jira ...`: parsing and the printed text. The handler gets plain data from the host
-// (`deps`), so the suites drive it without an app. No subcommand reads stdin (the manifest does
-// not declare it: with `stdin: true` every subcommand would wait for an open pipe).
+// (`deps`), so the suites drive it without an app. Only `update ... -` reads stdin: the manifest
+// declares `stdin` with `stdinDash`, so the app reads it only when an argument is exactly `-` and no
+// other subcommand waits on a script's open, silent stdin (an app before 0.10.1 ignores stdinDash
+// and reads it for every call, bounded by ccc's own deadline).
 
 const { issueKey, ago, stamp, oneLine, cut } = require('./util')
 const { LANES, LANE_IDS } = require('./lanes')
 const { missingText } = require('./settings')
+const { updatePlan, checkComment } = require('./write')
 
-const HELP = `ccc jira: your Jira issues, read-only (bronos.jira)
+const HELP = `ccc jira: your Jira issues (bronos.jira)
 
   ccc jira status            site, account, last poll, counts per lane, errors
   ccc jira refresh           poll Jira now and print the counts
@@ -15,15 +18,54 @@ const HELP = `ccc jira: your Jira issues, read-only (bronos.jira)
   ccc jira show <KEY>        the issue as readable text (description, comments, changes; new ones [new])
   ccc jira read <KEY>        mark it read (seen up to its newest activity)
   ccc jira unread <KEY>      mark it unread again
+  ccc jira update <KEY> [--status <name>] [-]
+                             a comment (plain text on stdin, with -) and/or a status change
+                             (--status: a transition name or the target status, any case)
   ccc jira help              this text
+
+update follows the project's setting "What ccc jira update does" (writes):
+  draft (default)  opens the reply page filled in and writes NOTHING: the person reads it, edits it
+                   and posts it, or not. The answer comes at once. This is the person's decision:
+                   do not run the command again to make it happen, and do not try another way.
+  direct           writes: the comment first, then the move; each step is reported.
+  off              refused: writing is off for this project.
+The comment is plain text: a blank line starts a paragraph, no formatting, no mentions, at most
+32,000 characters. Exit 0: written or draft opened; 1: refused or failed.
 
 Settings: ccc plugin config bronos.jira (the API token only in Settings > This project).
 `
 
 /**
+ * `update <KEY> [--status <name>] [-]` as `{ key, status, dash }` or `{ usage }`. `--status=<name>`
+ * works too; a name with spaces is one argument ("In Progress", quoted by the shell).
+ */
+function parseUpdate(rest) {
+  const usage = 'usage: ccc jira update <KEY> [--status <name>] [-]   (the comment on stdin with -)'
+  let key = null
+  let status = null
+  let dash = false
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]
+    if (a === '-') dash = true
+    else if (a === '--status' || a === '-s') {
+      if (i + 1 >= rest.length) return { usage: `--status needs a name\n${usage}` }
+      status = rest[++i]
+    } else if (a.startsWith('--status=')) status = a.slice('--status='.length)
+    else if (a.startsWith('-')) return { usage: `unknown option "${cut(a, 40)}"\n${usage}` }
+    else if (key === null) key = a
+    else return { usage: `one issue at a time\n${usage}` }
+  }
+  if (key === null) return { usage }
+  if (status !== null && !status.trim()) return { usage: `--status needs a name\n${usage}` }
+  return { key, status: status === null ? null : status.trim(), dash }
+}
+
+/**
  * @param {string[]} argv
  * @param {object} deps from the host: status(), refresh(signal), view(), show(key, signal),
- *   read(key), unread(key)
+ *   read(key), unread(key), writes() (the setting, read now), update(key, { comment, status,
+ *   tabId, signal }) -> { code, stdout?, stderr? }
+ * @param {{ stdin?: string, tabId?: string, signal?: AbortSignal }} [call]
  */
 async function runCli(argv, deps, call = {}) {
   const [cmd, ...rest] = argv
@@ -71,6 +113,29 @@ async function runCli(argv, deps, call = {}) {
         return fail(e && e.message ? e.message : String(e))
       }
     }
+    case 'update': {
+      const u = parseUpdate(rest)
+      if (u.usage) return fail(u.usage, 2)
+      const key = issueKey(u.key)
+      if (!key) return fail(`not an issue key: "${cut(u.key, 40)}" (like ABC-123)`, 2)
+      const st = deps.status()
+      if (!st.ready) return fail(notReady(st))
+      const comment = u.dash ? String(call.stdin || '') : ''
+      const plan = updatePlan(deps.writes(), { comment: comment.trim() ? comment : '', status: u.status })
+      if (plan.refuse) return fail(plan.refuse)
+      if (plan.usage) return fail(`${plan.usage}${u.dash ? ' (stdin was empty)' : ''}`, 2)
+      if (comment.trim()) {
+        const c = checkComment(comment)
+        if (c.error) return fail(`${key}: ${c.error}; nothing was written`)
+      }
+      try {
+        const r = await deps.update(key, { comment: comment.trim() ? comment : '', status: u.status, mode: plan.mode, tabId: call.tabId, signal: call.signal })
+        const out = (t) => (t && !t.endsWith('\n') ? t + '\n' : t || '')
+        return r.code === 0 ? { stdout: out(r.text), code: 0 } : { stderr: out(r.text), code: 1 }
+      } catch (e) {
+        return fail(e && e.message ? e.message : String(e))
+      }
+    }
     default:
       return fail(`unknown command "${cut(cmd, 40)}"\n\n${HELP}`, 2)
   }
@@ -104,12 +169,20 @@ function statusText(st, now = Date.now()) {
   lines.push(`lanes     ${countsLine(st)}`)
   lines.push(`triage    ${st.triage}`)
   lines.push(`annotate  ${st.annotate}`)
+  if (st.writes) lines.push(`writes    ${WRITES_TEXT[st.writes] || st.writes}`)
   if (st.deferred) lines.push(`pending   ${st.deferred} issues still to read in full (next polls)`)
   for (const p of st.problems) lines.push(`problem   ${p}`)
   if (st.error) lines.push(`error     ${st.error}`)
   for (const [lane, msg] of Object.entries(st.laneErrors || {})) lines.push(`error     ${lane}: ${msg}`)
   for (const e of (st.issueErrors || []).slice(0, 5)) lines.push(`error     ${e.key}: ${e.message}`)
   return lines.join('\n') + '\n'
+}
+
+// `ccc jira status`'s line for the writes setting: what `update` does now.
+const WRITES_TEXT = {
+  draft: 'draft: ccc jira update opens the reply page; the person posts it',
+  direct: 'direct: ccc jira update writes the comment and the move itself',
+  off: 'off: read-only, ccc jira update is refused and the panel offers no Reply',
 }
 
 const DOT = { urgent: 'U', action: 'A', fyi: 'f', noise: '.' }
@@ -135,4 +208,4 @@ function listText(view, lane) {
   return out.join('\n') + '\n'
 }
 
-module.exports = { runCli, statusText, listText, HELP }
+module.exports = { runCli, statusText, listText, parseUpdate, HELP }

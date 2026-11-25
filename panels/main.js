@@ -11,6 +11,9 @@ let state = null
 let wrongOpen = null // the key whose triage chooser is shown
 
 const $ = (id) => document.getElementById(id)
+// A read-only guest's view (ccPanel.view.access, the app's tag of this frame): no Reply button. Only a
+// hint that hides; the host checks every click's `from.access` itself.
+const readOnly = Boolean(typeof ccPanel === 'object' && ccPanel.view && ccPanel.view.access === 'read')
 
 function el(tag, props, ...children) {
   const n = document.createElement(tag)
@@ -83,7 +86,7 @@ function dot(verdict) {
 
 function rowActions(r) {
   const a = el('div', { class: 'actions' })
-  for (const b of rowButtons(r, { triageOn: state.triage.on })) {
+  for (const b of rowButtons(r, { triageOn: state.triage.on, writes: Boolean(state.writes), readOnly })) {
     const onclick = b.action === 'wrong' ? () => { wrongOpen = wrongOpen === r.key ? null : r.key; render() } : () => post(b.action, { key: r.key })
     const n = button(b.label, onclick, b.title)
     n.dataset.action = b.action

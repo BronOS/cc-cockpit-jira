@@ -8,6 +8,7 @@
 const { projectKey } = require('./jql')
 const { LANE_IDS } = require('./lanes')
 const { hashOf } = require('./util')
+const { writeMode } = require('./write')
 
 const LANE_DEFAULTS = { backlog: true, inProgress: true, mentioned: true, onHold: false, done: false }
 
@@ -77,6 +78,9 @@ function readSettings(p) {
   // Off unless set to exactly true: opening an issue used to mark it read, and people who open one
   // to glance at it (from Inbox above all) lost the unread mark they kept as a to-do.
   const markReadOnOpen = s.markReadOnOpen === true
+  // What `ccc jira update` does (0.8.0): draft (the default, and what an unknown value reads as: it
+  // writes nothing by itself), direct, or off (no writes at all, no Reply in the panel).
+  const writes = writeMode(s.writes)
   const cfg = {
     site: site.site || '',
     email,
@@ -91,6 +95,7 @@ function readSettings(p) {
     rowsPerLane: int(s.rowsPerLane, 10, 1, 300),
     triageText,
     markReadOnOpen,
+    writes,
     mailSenders,
   }
   // Ready = enough to talk to Jira. A bad optional value (a project key) is reported but does
