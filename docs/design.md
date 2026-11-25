@@ -3,12 +3,14 @@
 Status: design agreed with the user on 2026-11-02; 0.2.0 (same day, after trying 0.1.0): rows
 open on click with hover buttons, and the opened issue is styled HTML with attachments (section
 "The issue view"). External plugin (own repo, for the marketplace). The first source plugin for
-jev-triage. Read-only towards Jira. 0.3.0: an "Issues per lane" setting with Show all / Hide. 0.4.0: the last
+jev-triage. Read-only towards Jira until 0.8.0. 0.3.0: an "Issues per lane" setting with Show all / Hide. 0.4.0: the last
 poll and Refresh (an icon) in the panel's title bar on cc-cockpit 0.9.0+ (`ctx.panels.header`,
 `lib/header.js`; the page keeps its own line on older apps), and links open through
 `ctx.openExternal` on 0.9.1+ (a plugin host has no display variables, so xdg-open found no browser).
 0.5.0 (2026-11-03, designed with the user together with bronos.gmail 0.2.0): provides the `jira`
 service to other plugins (section "The jira service"); no app change needed.
+0.8.0 (designed with the user on 2026-11-24): writes to Jira, a comment and a status change, always
+checked by the person by default (section "Writing to Jira"). Read-only before it.
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
@@ -45,6 +47,11 @@ person's choice; default right) with lanes; CLI `ccc jira`.
   does nothing).
 - `triageText`: `full` (default: description and comments go to Jev) or `summary` (only key,
   summary, status, priority, type: for employers who object to issue text leaving).
+- `writes` (0.8.0, global value plus a per-project override like every project field): what
+  `ccc jira update` does. `draft` (default, "Claude drafts, I post"): it opens the reply page
+  filled in and writes nothing; `direct` ("ccc writes directly"): it writes; `off` ("Read-only"):
+  the command is refused and the panel offers no Reply (the plugin as before 0.8.0, for an employer
+  that wants no writes). A scoped token needs `write:jira-work` too for any write.
 - `mailSenders` (0.5.0): the addresses the site's notification mails come from, for the `jira`
   service; empty = Jira Cloud's own sender `jira@<site host>`, derived from `site` (nothing
   site-specific in the code). Lower-cased, at most 10; a bad one is a problem line, skipped.
@@ -213,17 +220,89 @@ time limit from the app), so this plugin checks and caps its callers itself (`li
 - Not configured: `issue` and `document` reject with `jira: the Jira plugin is not configured in
   this project (<missing fields>)`.
 
+## Writing to Jira (0.8.0)
+
+A comment and a status change on one issue, together or alone. The person writes from the reply page;
+Claude (any `ccc` caller) prepares one with `ccc jira update`, and with `writes: draft` the person makes the
+final decision there.
+
+Why the plugin decides and not Claude's side (agreed 2026-11-24): issue text reaches Claude (Discuss,
+`ccc jira show`, triage), so a description can say "close this ticket". A skill is advice the same text
+competes with; Claude Code's permission rules (`Bash(ccc jira update:*)` as ask) are a good extra layer per
+project but are walked around by `sh -c` or a script and skipped in auto and bypass modes. The setting is
+read in the plugin host on every call, for every caller: `CliCall.tabId` tells a Claude tab, but a Claude
+that unsets its token looks like the person's shell, so the rule is "ccc drafts, the page writes", not
+"Claude drafts". Not a boundary (Claude runs as the person's OS user, and could call the REST API with the
+token if it found it); it keeps a prompt-injected Claude from writing to Jira unseen.
+
+### Jira calls (`lib/client.js` gets its first non-GET methods)
+
+- Comment: `POST /rest/api/3/issue/<KEY>/comment` with `{ body: <ADF> }`. The text is plain: a blank line
+  starts a paragraph, a single newline is a `hardBreak`; nothing is parsed as markup and there are no
+  mentions (they need account ids). At most 32,000 characters (Jira's limit is 32,767), refused before the call.
+- Transitions: `GET /rest/api/3/issue/<KEY>/transitions?expand=transitions.fields`, read fresh each time
+  the page opens or a Move is about to run (workflows differ per project and per status). A transition
+  with a required field that has no default (a resolution screen) is listed but disabled, with "needs
+  fields: open in Jira". `POST /rest/api/3/issue/<KEY>/transitions` with `{ transition: { id } }`.
+- Same guards as the reads: the client's own base only (site or gateway), https, no redirect followed on
+  a write, the key checked as `[A-Z][A-Z0-9_]+-[0-9]+`. A 403 says the token may not write ("a scoped
+  token needs write:jira-work"); a 400 shows Jira's `errorMessages` / `errors`, cut.
+- Order when both are asked: the comment first, then the transition, so a comment that explains a move
+  is never missing after it. Each step reports on its own: a failed transition after a posted comment
+  says so, and the page keeps the status choice for a retry (the comment box is cleared, it is posted).
+- After a write: the issue is read again (store and lanes), its seen mark set to the new `updated` (the
+  person's own change is never unread; unread already ignores the person's own comments), and the feed
+  emits its item. The `jira` service gets no write methods (Left out).
+
+### The reply page (`panels/reply.html`, the plugin's own html overlay)
+
+- Opened by the panel row's new Reply button (hover, like Discuss), by a Reply button in the issue
+  overlay's toolbar (`ctx.overlay.buttons` on the `inbox-item` type, the same check as the item buttons:
+  only on overlays we or our reviewer opened), and by `ccc jira update` in draft mode. Not offered when
+  `writes` is `off`.
+- Shows the key, summary and current status (a lozenge), the "Move to" choice (Keep status first, then
+  the enabled transitions by name, with the target status when it differs from the name), and the
+  comment box. One button, its label from the choice: Post comment, Move, or Post and move; disabled
+  while nothing would happen. Ctrl/Cmd+Enter does not send: the click is the decision.
+- A draft from `ccc` is marked "Draft from Claude" with the tab's name when the caller was a Claude tab
+  (`CliCall.tabId`, the app's own value), else "Draft from ccc". The person edits freely; nothing is sent
+  until the click.
+- One reply page per issue. A new draft for an issue whose page is open replaces it when the person has
+  not edited it; when they have, the draft is refused ("the person is editing a reply to <KEY>") and the
+  page is left alone.
+- Moved meanwhile: the Move re-reads the transitions; when the chosen one is gone, nothing is written (the
+  comment neither), the list refreshes and the page says the status changed.
+- Owner only: guests never get the page or the Reply buttons (the plugin is hidden from guests unless
+  shown; even shown, a write needs `access: write`, checked by the host on every click from `from.access`).
+
+### `ccc jira update <KEY> [--status <name>] [-]`
+
+- The comment comes on stdin with `-` (bounded like every plugin command's stdin), the status by
+  transition name or target status name, case-insensitive. Either may be left out, not both.
+- `draft`: opens the reply page with both filled in and answers at once, without waiting for the
+  person (plugin commands are bounded to 30 s): "Draft opened for <KEY>: the person posts it." A
+  status that matches no transition, or a disabled one, still opens the page with Keep status and a
+  line naming what was asked and what is possible; the answer says so too.
+- `direct`: writes (comment, then transition) and answers what happened step by step; an unknown or
+  disabled status is refused before anything is written, with the list of possible ones.
+- `off`: refused, "writing is off for this project (setting: What ccc jira update does)".
+- Exit codes: 0 done or draft opened, 1 refused or failed. The guide topic (`ccc jira help`) says the
+  person decides in draft mode, so Claude should not repeat the call to make it happen.
+
 ## CLI
 
 `ccc jira status` (site, account, last poll, counts per lane, errors), `ccc jira refresh`,
 `ccc jira list [lane]`, `ccc jira show <KEY>` (the readable text), `ccc jira read|unread <KEY>`,
-`ccc jira help`. No stdin.
+`ccc jira update <KEY> [--status <name>] [-]` (0.8.0, section "Writing to Jira"; the only one with
+stdin), `ccc jira help`.
 
 ## Left out of v1
 
 The `jira` service has no events (a consumer asks again when it needs to; bronos.gmail caches its
-answers with a TTL), and no write methods (the plugin stays read-only).
+answers with a TTL), and no write methods: other plugins (Autopilot) would draft the same way, a later
+version.
 
-Writing to Jira (comments, transitions), Jira Server/DC (PAT), OAuth. Since 0.2.0 attachments
+Jira Server/DC (PAT), OAuth. Writes beyond a comment and a transition (fields, assignee, mentions,
+restricted comments, a transition's own fields). Since 0.2.0 attachments
 are shown (images inline, the rest as links) but not scaled down: a picture over 700 KiB is a
 link.
