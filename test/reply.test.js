@@ -519,3 +519,30 @@ test('R2-4: a click refused after the collect leaves the button usable, also whe
   assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled), Boolean(b.busy)]), [['Post comment', false, false]])
   await h.stop()
 })
+
+test('R3: a late refused fill leaves the person\'s typed words and an enabled button, not the draft\'s empty form', async () => {
+  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
+  const { ctx, h, jira, page } = boot({ draftWaitMs: 50, jira: { routes: g.route } })
+  await h.pollNow('test')
+  await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })
+  const [o] = replyPages(ctx)
+  // A status-only draft to a status Jira does not offer (its fill is an empty form), its reads pending.
+  g.armed = true
+  page.hold = true
+  const cli = ctx.runCli(['update', 'ABC-1', '--status', 'Nowhere'])
+  await until(() => g.hit > 0)
+  // The person types meanwhile: the page will keep their words over the fill, and its "not applied"
+  // answer reaches the host only after the host stopped waiting.
+  page.edit(o, 'my words')
+  g.armed = false
+  g.open()
+  await cli
+  await until(() => o.posts.some((m) => m.type === 'issue' && m.fill && m.fill.n === 2))
+  await new Promise((r) => setTimeout(r, 150)) // past the host's own wait for the page's answer
+  assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled)]), [['Post comment', false]], 'the visible comment can be sent')
+  page.release()
+  assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled)]), [['Post comment', false]], 'the late answer keeps it')
+  await o.click('send', OWNER)
+  assert.deepEqual(jira.writes.map((w) => [w.what, w.body.body.content[0].content[0].text]), [['comment', 'my words']])
+  await h.stop()
+})

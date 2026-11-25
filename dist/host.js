@@ -1019,8 +1019,13 @@ function start(ctx, io = {}) {
       applied = !(ack && ack.applied === false)
       // No answer in time: no longer pending, but not taken as drawn either (review R2-3): only the
       // page's own answer, however late, moves the revision a click is bound to.
-      if (ack && ack.late && page.fillPending === n) page.fillPending = null
-      if (applied) page.form = { comment: form.comment, transitionId: form.transitionId }
+      if (ack && ack.late) {
+        if (page.fillPending === n) page.fillPending = null
+        // Nor are its fields taken as the page's (review R3): the person may have typed meanwhile
+        // and the page kept their words. The form stays as the page last reported it; the late
+        // answer (`filled`) reconciles it.
+        page.lateFill = { n, comment: form.comment, transitionId: form.transitionId }
+      } else if (applied) page.form = { comment: form.comment, transitionId: form.transitionId }
       else page.edited = true
     }
     updateButton(page)
@@ -1031,6 +1036,15 @@ function start(ctx, io = {}) {
   function filled(page, n, applied) {
     if (page.fillPending === n) page.fillPending = null
     if (applied && n > page.shownRev) page.shownRev = n
+    const late = page.lateFill
+    if (late && late.n === n) {
+      // The answer to a fill the host stopped waiting for: only now is it known what the page shows.
+      // Taken over only when no newer fill went out since; refused means the person's words stay.
+      page.lateFill = null
+      if (!applied) page.edited = true
+      else if (n === page.seq) page.form = { comment: late.comment, transitionId: late.transitionId }
+      updateButton(page)
+    }
   }
 
   const DRAFT_CHANGED = 'The draft just changed: read it again and click once more. Nothing was written.'
@@ -1109,6 +1123,7 @@ function start(ctx, io = {}) {
       // and none is taken while a fill is on its way.
       shownRev: 0,
       fillPending: null,
+      lateFill: null,
     }
     replies.set(key, page)
     const end = () => {
