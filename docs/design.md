@@ -272,8 +272,9 @@ token if it found it); it keeps a prompt-injected Claude from writing to Jira un
   page is left alone.
 - Moved meanwhile: the Move re-reads the transitions; when the chosen one is gone, nothing is written (the
   comment neither), the list refreshes and the page says the status changed.
-- Owner only: guests never get the page or the Reply buttons (the plugin is hidden from guests unless
-  shown; even shown, a write needs `access: write`, checked by the host on every click from `from.access`).
+- The owner and write guests (Oleg, 2026-11-25: "with write access, yes"): the plugin is hidden from
+  guests unless shown; even shown, a read guest gets no Reply and a write needs `access: write`, checked
+  by the host on every click from `from.access`.
 
 ### `ccc jira update <KEY> [--status <name>] [-]`
 
