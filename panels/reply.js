@@ -4,7 +4,7 @@
 //       the issue as read just now; `fill` (a draft, or the empty form of a Reply click) replaces the
 //       fields unless the person typed since the last fill, and is answered { type: 'filled', n, applied }
 //   { type: 'loadError', message }         the read failed: the error and Try again
-//   { type: 'collect', n }                 the toolbar's button was clicked: answer { type: 'values', n, comment, transitionId }
+//   { type: 'collect', n }                 the toolbar's button was clicked: answer { type: 'values', n, comment, transitionId, rev }
 //   { type: 'busy', on }                   a write is under way: the fields are locked
 //   { type: 'error', message }             a refusal or a failure; nothing more happened
 //   { type: 'transitions', status, tone, transitions, keep, message }   the issue moved meanwhile: nothing was written
@@ -25,6 +25,9 @@ let dirty = false // the person typed or chose since the last fill
 let busy = false
 let drawn = false
 let transitions = []
+// The fill (draft) number this page last drew: every submission carries it, and the host refuses one
+// that is not the draft it last saw drawn (a new draft racing the click; review R1-1).
+let rev = 0
 
 const post = (m) => ccPanel.post(m)
 
@@ -107,7 +110,7 @@ function edited() {
 comment.addEventListener('input', edited)
 move.addEventListener('change', edited)
 $('send').addEventListener('click', () => {
-  if (!busy) post({ type: 'submit', comment: comment.value, transitionId: move.value })
+  if (!busy) post({ type: 'submit', comment: comment.value, transitionId: move.value, rev })
 })
 $('openJira').addEventListener('click', () => post({ type: 'browser' }))
 $('retry').addEventListener('click', () => {
@@ -132,6 +135,7 @@ ccPanel.onMessage((m) => {
       const apply = f && !(drawn && dirty)
       drawTransitions(m.transitions, apply ? f.transitionId : f ? move.value : m.keep)
       if (apply) {
+        rev = f.n
         comment.value = typeof f.comment === 'string' ? f.comment : ''
         dirty = false
         line('marker', f.marker || '')
@@ -153,7 +157,7 @@ ccPanel.onMessage((m) => {
       ready()
       return
     case 'collect':
-      if (Number.isInteger(m.n)) post({ type: 'values', n: m.n, comment: comment.value, transitionId: move.value })
+      if (Number.isInteger(m.n)) post({ type: 'values', n: m.n, comment: comment.value, transitionId: move.value, rev })
       return
     case 'busy':
       busy = Boolean(m.on)

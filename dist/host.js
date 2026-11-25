@@ -95,6 +95,11 @@ function start(ctx, io = {}) {
     ui: { collapsed: {}, expanded: {} }, // per lane id; `expanded` = Show all pressed
     notice: null, // { text, kind: 'info'|'error' } after an action, until dismissed or replaced
     choose: null, // { key, tabs } when Discuss needs the person to pick a tab
+    // Writes (0.8.0) vs a poll already under way (review R1-5): each write bumps `writeGen` and keeps
+    // the issue as read after it; a poll that started before a write keeps those newer copies over its
+    // own older answer and is followed by a fresh poll.
+    writeGen: 0,
+    written: new Map(), // key -> { gen, header, issue }
     stopped: false,
   }
 
@@ -185,12 +190,15 @@ function start(ctx, io = {}) {
   function pollNow(reason) {
     if (S.polling) return S.polling
     if (!S.settings.ready || S.stopped) return Promise.resolve()
+    const gen0 = S.writeGen
+    let followUp = false
     S.polling = (async () => {
       try {
         await ready
         if (!S.cache || S.cache.site !== cfg().site || S.cache.email !== cfg().email) await loadSiteState()
         const r = await poll({ client: client(), cfg: cfg(), cache: S.cache, prev: S.lists || undefined, now: now(), signal: abort.signal })
         S.lists = r.lists
+        followUp = keepWrites(gen0)
         S.lastPoll = r.at
         S.stats = r.stats
         S.laneErrors = r.laneErrors
@@ -219,10 +227,38 @@ function start(ctx, io = {}) {
         postState()
         // After a failed poll too: the feed's state (signed out, error) changed.
         emitFeed()
+        // A write landed while this poll ran: one more, whose searches were sent after it.
+        if ((followUp || S.writeGen !== gen0) && !S.stopped) void pollNow('after a write')
       }
     })()
     postState()
     return S.polling
+  }
+
+  /**
+   * After a poll that started at write generation `gen0`: the issues written since then keep the copy
+   * read after the write (its header in the lists, its full copy in the cache) wherever the poll's
+   * own answer is older, since its searches may have been sent before the write. Entries no poll
+   * needs any more (written before this poll started) are dropped. True when such a write happened.
+   */
+  function keepWrites(gen0) {
+    let newer = false
+    for (const [key, w] of S.written) {
+      if (w.gen <= gen0) {
+        S.written.delete(key)
+        continue
+      }
+      newer = true
+      for (const name of ['assigned', 'done', 'candidates']) {
+        const list = S.lists && S.lists[name]
+        if (!Array.isArray(list)) continue
+        const i = list.findIndex((x) => x.key === key)
+        if (i >= 0 && (list[i].updatedAt || 0) <= (w.header.updatedAt || 0)) list[i] = { ...w.header, closedAt: w.header.closedAt || list[i].closedAt || 0 }
+      }
+      const cached = S.cache && S.cache.issues[key]
+      if (w.issue && cached && (cached.updatedAt || 0) < (w.issue.updatedAt || 0)) S.cache.issues[key] = w.issue
+    }
+    return newer
   }
 
   let stopSchedule = null
@@ -962,6 +998,7 @@ function start(ctx, io = {}) {
       page.form.transitionId = keepChoice(transitions, page.form.transitionId)
     }
     const acked = n !== null ? waitFor(page, n) : null
+    if (n !== null) page.fillPending = n
     postReply(page, {
       type: 'issue',
       key,
@@ -979,12 +1016,22 @@ function start(ctx, io = {}) {
       // A page that never answers (it did not load) took nothing the person could have edited.
       const ack = await settleWithin(acked, DRAFT_WAIT_MS, { applied: true, late: true })
       applied = !(ack && ack.applied === false)
+      // No answer in time: taken as drawn (as the page does on load); a late answer still corrects it.
+      if (ack && ack.late) filled(page, n, true)
       if (applied) page.form = { comment: form.comment, transitionId: form.transitionId }
       else page.edited = true
     }
     updateButton(page)
     return { ok: true, applied, asked }
   }
+
+  /** The page drew fill `n` (or kept the person's words over it): the revision a click is bound to. */
+  function filled(page, n, applied) {
+    if (page.fillPending === n) page.fillPending = null
+    if (applied && n > page.shownRev) page.shownRev = n
+  }
+
+  const DRAFT_CHANGED = 'The draft just changed: read it again and click once more. Nothing was written.'
 
   /** A promise for the page's answer number `n` (`filled`, `values`); null when the page closes first. */
   function waitFor(page, n) {
@@ -1055,6 +1102,11 @@ function start(ctx, io = {}) {
       waiting: new Map(),
       button: null,
       loading: null,
+      // Review R1-1: the fill (draft) number the page last said it drew, and one posted but not yet
+      // acknowledged. A click is bound to what the page showed: a submission must carry `shownRev`,
+      // and none is taken while a fill is on its way.
+      shownRev: 0,
+      fillPending: null,
     }
     replies.set(key, page)
     const end = () => {
@@ -1084,7 +1136,9 @@ function start(ctx, io = {}) {
         page.form = { comment: typeof m.comment === 'string' ? m.comment : '', transitionId: typeof m.transitionId === 'string' ? m.transitionId : '' }
         return updateButton(page)
       case 'filled':
-        if (Number.isInteger(m.n)) answer(page, m.n, { applied: m.applied !== false })
+        if (!Number.isInteger(m.n)) return
+        filled(page, m.n, m.applied !== false)
+        answer(page, m.n, { applied: m.applied !== false })
         return
       case 'values':
         if (Number.isInteger(m.n)) answer(page, m.n, m)
@@ -1108,11 +1162,23 @@ function start(ctx, io = {}) {
    */
   async function sendFromToolbar(page, from) {
     if (!wr.mayWrite(from)) return postReply(page, { type: 'error', message: 'Only the owner or a guest with write access can post.' })
-    const n = ++page.seq
-    const got = waitFor(page, n)
-    postReply(page, { type: 'collect', n })
-    const values = await settleWithin(got, PAGE_ANSWER_MS, null)
+    if (page.busy) return
+    // A draft on its way to the page may already be drawn there while the person read the old one.
+    if (page.fillPending !== null) return postReply(page, { type: 'error', message: DRAFT_CHANGED })
+    // Locked while the page answers: a draft arriving now is refused (wr.draftDecision), so it cannot
+    // land between the click and the values.
+    page.busy = true
+    let values
+    try {
+      const n = ++page.seq
+      const got = waitFor(page, n)
+      postReply(page, { type: 'collect', n })
+      values = await settleWithin(got, PAGE_ANSWER_MS, null)
+    } finally {
+      page.busy = false
+    }
     if (!values) return postReply(page, { type: 'error', message: 'The page did not answer; nothing was written. Try again.' })
+    // No await from here into send's own lock: nothing can slip in between.
     return send(page, values, from)
   }
 
@@ -1128,6 +1194,7 @@ function start(ctx, io = {}) {
     if (!wr.mayWrite(from)) return fail('Only the owner or a guest with write access can post.')
     if (!writesOn()) return fail(`Not posted: ${wr.OFF_MESSAGE}.`)
     if (!page.loaded) return fail(`${page.key} is not read yet; nothing was written.`)
+    if (page.fillPending !== null || values.rev !== page.shownRev) return fail(DRAFT_CHANGED)
     const rawComment = typeof values.comment === 'string' ? values.comment : ''
     const transitionId = typeof values.transitionId === 'string' ? values.transitionId : ''
     let comment = ''
@@ -1142,7 +1209,7 @@ function start(ctx, io = {}) {
     updateButton(page)
     postReply(page, { type: 'busy', on: true })
     try {
-      const r = await wr.performWrite({ client: client(), key: page.key, comment, transitionId, expectStatus: transitionId ? page.status : undefined, signal: abort.signal })
+      const r = await wr.performWrite({ client: client(), key: page.key, comment, transitionId, expectStatus: transitionId ? page.status : undefined, guard: writeGuard(null), signal: abort.signal })
       if (r.moved) {
         page.transitions = r.transitions || page.transitions
         if (r.status !== undefined) {
@@ -1208,7 +1275,9 @@ function start(ctx, io = {}) {
         // closedAt comes from the Done search's own fields, which a full read does not ask for.
         if (i >= 0) list[i] = { ...fresh, closedAt: fresh.closedAt || list[i].closedAt || 0 }
       }
-      if (rowOf(key) || S.cache.issues[key]) S.cache.issues[key] = compact(raw, S.cache.me.accountId)
+      const kept = compact(raw, S.cache.me.accountId)
+      if (rowOf(key) || S.cache.issues[key]) S.cache.issues[key] = kept
+      S.written.set(key, { gen: ++S.writeGen, header: fresh, issue: kept })
       if (S.seen) {
         S.seen.marks[key] = Math.max(S.seen.marks[key] || 0, fresh.updatedAt || now())
         bound(S.seen)
@@ -1224,6 +1293,23 @@ function start(ctx, io = {}) {
     emitFeed()
     void classifyChanged()
     void pollNow('write')
+  }
+
+  /**
+   * Checked right before each POST of a write (review R1-2): the settings may have changed during the
+   * reads before it. Writing switched off, the site, email or token changed (the client in hand is the
+   * old one), or for `ccc` direct the mode no longer `direct`: the write stops there.
+   */
+  function writeGuard(needMode) {
+    const conn = connectionKey(cfg())
+    return () => {
+      if (S.stopped) return 'the plugin stopped'
+      const mode = cfg().writes
+      if (mode === 'off') return wr.OFF_MESSAGE
+      if (needMode && mode !== needMode) return `the writes setting changed to ${mode}`
+      if (connectionKey(cfg()) !== conn) return 'the Jira settings (site, email or token) changed meanwhile'
+      return null
+    }
   }
 
   /**
@@ -1258,7 +1344,7 @@ function start(ctx, io = {}) {
       transitionId = m.transition.id
     }
     const comment = o.comment ? wr.checkComment(o.comment).text || '' : ''
-    const r = await wr.performWrite({ client: client(), key, comment, transitionId, fresh, signal: o.signal })
+    const r = await wr.performWrite({ client: client(), key, comment, transitionId, fresh, guard: writeGuard('direct'), signal: o.signal })
     if (r.steps.some((x) => x.ok)) await afterWrite(key)
     const lines = r.steps.length ? wr.stepLines(key, r.steps) : [`${key}: ${r.error || 'nothing was written'}`]
     return { code: r.ok ? 0 : 1, text: lines.join('\n') }

@@ -22,16 +22,25 @@ function fakePage() {
     if (m.type === 'issue') {
       const f = m.fill
       const apply = Boolean(f) && !(st.drawn && st.dirty)
-      if (apply) Object.assign(st, { comment: f.comment, transitionId: f.transitionId, dirty: false, marker: f.marker, asked: f.asked })
-      if (f) o.send({ type: 'filled', n: f.n, applied: apply })
+      if (apply) Object.assign(st, { comment: f.comment, transitionId: f.transitionId, dirty: false, marker: f.marker, asked: f.asked, rev: f.n })
+      // `page.hold`: the page drew the fill but its ack is still on the way (released by page.release()).
+      const ack = () => f && o.send({ type: 'filled', n: f.n, applied: apply })
+      if (page.hold) page.held.push(ack)
+      else ack()
       st.drawn = true
     } else if (m.type === 'collect') {
-      o.send({ type: 'values', n: m.n, comment: st.comment, transitionId: st.transitionId })
+      o.send({ type: 'values', n: m.n, comment: st.comment, transitionId: st.transitionId, rev: st.rev })
     } else if (m.type === 'result' && m.clearComment) {
       st.comment = ''
     }
   }
   page.state = (o) => states.get(o)
+  page.hold = false
+  page.held = []
+  page.release = () => {
+    page.hold = false
+    for (const a of page.held.splice(0)) a()
+  }
   /** The person types (and maybe picks a move). */
   page.edit = (o, comment, transitionId) => {
     const st = states.get(o)
@@ -48,9 +57,11 @@ const UPDATED = '2026-11-02T11:30:00.000+0000'
 function boot(opts = {}) {
   const jiraOpts = { ...(opts.jira || {}) }
   // After a write Jira's copy moves on: a new `updated` (the seen mark follows it).
-  jiraOpts.onWrite = () => {
+  jiraOpts.onWrite = (w) => {
+    if (opts.onWrite) opts.onWrite(w)
     const raw = fixture('issue-ABC-1.json')
     raw.fields.updated = UPDATED
+    if (opts.mutate) opts.mutate(raw)
     jiraOpts.issues = { ...(jiraOpts.issues || {}), 'ABC-1': raw }
   }
   const jira = fakeJira(jiraOpts)
@@ -295,16 +306,135 @@ test('an app without overlay toolbar buttons: the page posts submit from its own
   const [o] = replyPages(ctx)
   await until(() => lastOf(o, 'issue'))
   assert.equal(lastOf(o, 'issue').toolbar, false)
-  o.send({ type: 'submit', comment: 'x'.repeat(32001), transitionId: '' }, OWNER)
+  o.send({ type: 'submit', comment: 'x'.repeat(32001), transitionId: '', rev: 1 }, OWNER)
   await until(() => lastOf(o, 'error'))
   assert.match(lastOf(o, 'error').message, /at most 32,000/)
-  o.send({ type: 'submit', comment: 'hi', transitionId: '41' }, OWNER)
+  o.send({ type: 'submit', comment: 'hi', transitionId: '41', rev: 1 }, OWNER)
   await until(() => /not in the list/.test(lastOf(o, 'error').message))
-  o.send({ type: 'submit', comment: 'hi', transitionId: '' }, READ)
+  o.send({ type: 'submit', comment: 'hi', transitionId: '', rev: 1 }, READ)
   await until(() => /write access/.test(lastOf(o, 'error').message))
   assert.equal(jira.writes.length, 0)
-  o.send({ type: 'submit', comment: 'hi', transitionId: '' }, OWNER)
+  o.send({ type: 'submit', comment: 'hi', transitionId: '', rev: 1 }, OWNER)
   await until(() => o.closed)
   assert.deepEqual(jira.writes.map((w) => w.what), ['comment'])
+  await h.stop()
+})
+
+// ---- review round 1 (codex sol/high) ----
+
+/** A gate: requests matching `match` wait until open() (the test changes things meanwhile). */
+function gate(match) {
+  let open
+  const opened = new Promise((r) => (open = r))
+  const g = { hit: 0, armed: false }
+  g.open = open
+  g.route = async (url, init) => {
+    if (g.armed && match(url, init)) {
+      g.hit++
+      await opened
+    }
+    return undefined
+  }
+  return g
+}
+
+test('R1-1: a click while a new draft is arriving posts nothing; a stale revision is refused', async () => {
+  const { ctx, h, jira, page } = boot()
+  await h.pollNow('test')
+  assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'draft A' })).code, 0)
+  const [o] = replyPages(ctx)
+  // Draft B reaches the page (drawn) while its ack is still on the way; the person clicks, having read A.
+  page.hold = true
+  const cli = ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'draft B, never reviewed' })
+  await until(() => page.state(o).comment === 'draft B, never reviewed')
+  await o.click('send', OWNER)
+  assert.equal(jira.writes.length, 0, 'B is not posted on a click made on A')
+  assert.match(lastOf(o, 'error').message, /draft just changed/)
+  page.release()
+  assert.equal((await cli).code, 0)
+  // The page's own button with a revision that is not the one the host last saw drawn: refused.
+  const { ctx: c2, h: h2, jira: j2 } = boot({ noToolbar: true })
+  await h2.pollNow('test')
+  await c2.runCli(['update', 'ABC-1', '-'], { stdin: 'A' })
+  const [q] = replyPages(c2)
+  q.send({ type: 'submit', comment: 'A', transitionId: '', rev: 0 }, OWNER)
+  await until(() => lastOf(q, 'error'))
+  assert.match(lastOf(q, 'error').message, /draft just changed/)
+  assert.equal(j2.writes.length, 0)
+  await h.stop()
+  await h2.stop()
+})
+
+test('R1-2: writes switched off (or the token changed) during the reads: ccc direct posts nothing', async () => {
+  for (const change of [{ writes: 'off' }, { writes: 'draft' }, { writes: 'direct', apiToken: 'another-token' }]) {
+    const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
+    const { ctx, h, jira } = boot({ project: { writes: 'direct' }, jira: { routes: g.route } })
+    await h.pollNow('test')
+    g.armed = true
+    const cli = ctx.runCli(['update', 'ABC-1', '--status', 'Done', '-'], { stdin: 'hi' })
+    await until(() => g.hit > 0)
+    await ctx.changeSettings({ ...CONFIGURED, ...change })
+    g.open()
+    const r = await cli
+    assert.equal(jira.writes.length, 0, JSON.stringify(change))
+    assert.equal(r.code, 1)
+    assert.match(r.stderr, /nothing was written/)
+    await h.stop()
+  }
+})
+
+test('R1-2: the reply page: writes switched off during the click\'s reads posts nothing', async () => {
+  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
+  const { ctx, h, jira, page } = boot({ jira: { routes: g.route } })
+  await h.pollNow('test')
+  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
+  const [o] = replyPages(ctx)
+  await until(() => lastOf(o, 'issue'))
+  page.edit(o, 'hi', '21')
+  g.armed = true
+  const click = o.click('send', OWNER)
+  await until(() => g.hit > 0)
+  await ctx.changeSettings({ ...CONFIGURED, writes: 'off' })
+  g.open()
+  await click
+  assert.equal(jira.writes.length, 0)
+  await h.stop()
+})
+
+test('R1-5: a poll that started before a write does not bring the old status back', async () => {
+  let written = false
+  const g = gate((url) => url.includes('/search/jql'))
+  const routes = async (url, init) => {
+    const before = !written // the search was sent before the write: Jira's answer is the old one
+    await g.route(url, init)
+    if (!before && url.includes('/search/jql') && url.includes('statusCategory+%21%3D+Done')) {
+      const body = fixture('search-assigned-1.json')
+      body.issues = body.issues.filter((i) => i.key !== 'ABC-1') // moved to Done: no longer open
+      return new Response(JSON.stringify(body), { status: 200 })
+    }
+    return undefined
+  }
+  const { ctx, h } = boot({
+    project: { writes: 'direct' },
+    jira: { routes },
+    onWrite: () => (written = true),
+    mutate: (raw) => (raw.fields.status = { name: 'Done', statusCategory: { key: 'done' } }),
+  })
+  await h.pollNow('test')
+  const inProgress = () => ctx.lastState().lanes.find((l) => l.id === 'inProgress').rows.map((r) => r.key)
+  assert.ok(inProgress().includes('ABC-1'))
+  g.armed = true
+  const slow = h.pollNow('slow') // its search waits at the gate, sent before the write
+  await until(() => g.hit > 0)
+  const r = await ctx.runCli(['update', 'ABC-1', '--status', 'Done'])
+  assert.equal(r.code, 0, r.stderr)
+  assert.ok(!inProgress().includes('ABC-1'), 'the write moved it out')
+  g.armed = false
+  g.open()
+  await slow
+  assert.ok(!inProgress().includes('ABC-1'), 'the stale poll did not put it back')
+  // A follow-up poll was queued behind the stale one, and it agrees.
+  await until(() => !h.S.polling)
+  assert.ok(!inProgress().includes('ABC-1'))
   await h.stop()
 })

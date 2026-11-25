@@ -247,7 +247,9 @@ async function guardedWrite(url, o) {
  * refusing the body (a required field, a workflow condition), cut.
  */
 async function readWrite(res, what) {
-  if (res.status >= 200 && res.status < 300) return okBody(res, what)
+  // A 2xx is a write that happened, whatever its body: a body that cannot be read or parsed (a
+  // proxy's page, a reset stream) must not read as "not posted", or a retry posts it twice (R1-4).
+  if (res.status >= 200 && res.status < 300) return okBody(res, what).catch(() => null)
   const text = await bodyText(res)
   const detail = jiraMessage(text)
   if (res.status === 403) {

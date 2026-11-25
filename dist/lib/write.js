@@ -180,12 +180,27 @@ function mayWrite(from) {
   return typeof from === 'object' && (from.access === 'owner' || from.access === 'write')
 }
 
+/** Jira's `{ key, fields }` header (client.issueHeader) as `{ status, category }`. */
+function statusOfHead(head) {
+  const st = head && head.fields && head.fields.status
+  return { status: st && typeof st.name === 'string' ? st.name : '', category: (st && st.statusCategory && st.statusCategory.key) || '' }
+}
+
+const sameStatus = (a, b) => String(a).toLowerCase() === String(b).toLowerCase()
+
 /**
  * One write: the comment, then the transition (so a comment explaining a move is never missing
- * after it), each step reported on its own. With a transition the transitions are read again first
- * (unless `fresh` ones are given, read just now by the caller) and, when `expectStatus` is given,
- * the issue's status too: when the chosen transition is gone or disabled, or the status is no longer
- * the one the person saw, nothing is written, the comment neither (`moved: true`, with the fresh list).
+ * after it), each step reported on its own.
+ *
+ * - With a transition the transitions and the status are read first (the transitions skipped when
+ *   `fresh` ones are given, read just now by the caller): when the chosen transition is gone or
+ *   disabled, or the status is not the one the person saw (`expectStatus`), nothing is written, the
+ *   comment neither (`moved: true`, with the fresh list).
+ * - After a posted comment, both are read again right before the move (review R1-3): a comment can
+ *   move the issue itself (an automation rule sending it to Blocked), and the saved move would
+ *   override that. Changed: the comment is reported posted and the move is refused.
+ * - `guard()` runs right before each POST (review R1-2): a message there (writing switched off, the
+ *   site, account or token changed while the reads were under way) stops the write at that point.
  *
  * @param {object} o
  * @param {{ comment: Function, transitions: Function, transition: Function, issueHeader?: Function }} o.client
@@ -194,37 +209,38 @@ function mayWrite(from) {
  * @param {string} [o.transitionId]
  * @param {string} [o.expectStatus] the status the page showed
  * @param {object[]} [o.fresh] transitions read by the caller for this very write
+ * @param {() => string|null} [o.guard] why not to send now, or null
  * @param {AbortSignal} [o.signal]
- * @returns {Promise<{ ok: boolean, steps: { step: 'comment'|'transition', ok: boolean, message?: string, to?: string }[], moved?: boolean, transitions?: object[], status?: string, error?: string }>}
+ * @returns {Promise<{ ok: boolean, steps: { step: 'comment'|'transition', ok: boolean, message?: string, to?: string }[], moved?: boolean, transitions?: object[], status?: string, category?: string, error?: string }>}
  */
 async function performWrite(o) {
   const { client, key, comment, transitionId, signal } = o
+  const guard = () => (o.guard ? o.guard() : null)
   const steps = []
   let chosen = null
   let transitions = null
   let status
   let category
+  const readBoth = (useFresh) =>
+    Promise.all([useFresh && o.fresh ? o.fresh : client.transitions(key, signal), client.issueHeader ? client.issueHeader(key, signal) : null])
   if (transitionId) {
     try {
-      const [list, head] = await Promise.all([
-        o.fresh ? o.fresh : client.transitions(key, signal),
-        o.expectStatus !== undefined && client.issueHeader ? client.issueHeader(key, signal) : null,
-      ])
+      const [list, head] = await readBoth(true)
       transitions = list
-      // client.issueHeader answers Jira's `{ key, fields }`.
-      const st = head && head.fields && head.fields.status
-      if (head) status = st && typeof st.name === 'string' ? st.name : ''
-      if (head) category = (st && st.statusCategory && st.statusCategory.key) || ''
+      if (head) ({ status, category } = statusOfHead(head))
     } catch (e) {
       return { ok: false, steps, error: `could not read the possible moves again, so nothing was written: ${msg(e)}` }
     }
     chosen = transitions.find((t) => t.id === transitionId && t.enabled) || null
-    const statusMoved = status !== undefined && o.expectStatus !== undefined && status.toLowerCase() !== String(o.expectStatus).toLowerCase()
+    const statusMoved = status !== undefined && o.expectStatus !== undefined && !sameStatus(status, o.expectStatus)
     if (!chosen || statusMoved) {
       return { ok: false, steps, moved: true, transitions, ...(status !== undefined ? { status, category } : {}), error: `${key} changed meanwhile${statusMoved ? ` (its status is now ${status})` : ''}: that move is not possible any more, so nothing was written. Choose again.` }
     }
   }
+  const target = chosen ? chosen.to || chosen.name : ''
   if (comment) {
+    const stop = guard()
+    if (stop) return { ok: false, steps, error: `${stop}; nothing was written` }
     try {
       await client.comment(key, comment, signal)
       steps.push({ step: 'comment', ok: true })
@@ -234,16 +250,39 @@ async function performWrite(o) {
       if (chosen) steps.push({ step: 'transition', ok: false, message: 'not tried: the comment failed' })
       return { ok: false, steps, ...(transitions ? { transitions } : {}) }
     }
-  }
-  if (chosen) {
-    try {
-      await client.transition(key, chosen.id, signal)
-      steps.push({ step: 'transition', ok: true, to: chosen.to || chosen.name })
-    } catch (e) {
-      steps.push({ step: 'transition', ok: false, message: msg(e), to: chosen.to || chosen.name })
+    if (chosen) {
+      let changed = ''
+      try {
+        const [list, head] = await readBoth(false)
+        transitions = list
+        const before = status
+        if (head) ({ status, category } = statusOfHead(head))
+        if (before !== undefined && status !== undefined && !sameStatus(status, before)) changed = `${key} changed after the comment (its status is now ${status})`
+        else if (!list.some((t) => t.id === chosen.id && t.enabled)) changed = `${key} changed after the comment (that move is not possible any more)`
+      } catch (e) {
+        changed = `could not check ${key} again after the comment: ${msg(e)}`
+      }
+      if (changed) {
+        steps.push({ step: 'transition', ok: false, message: `${changed}; the move was not made`, to: target })
+        return { ok: false, steps, transitions, ...(status !== undefined ? { status, category } : {}) }
+      }
     }
   }
-  return { ok: steps.length > 0 && steps.every((s) => s.ok), steps, ...(transitions ? { transitions } : {}) }
+  if (chosen) {
+    const stop = guard()
+    if (stop) {
+      if (!steps.length) return { ok: false, steps, transitions, error: `${stop}; nothing was written` }
+      steps.push({ step: 'transition', ok: false, message: `not tried: ${stop}`, to: target })
+      return { ok: false, steps, transitions }
+    }
+    try {
+      await client.transition(key, chosen.id, signal)
+      steps.push({ step: 'transition', ok: true, to: target })
+    } catch (e) {
+      steps.push({ step: 'transition', ok: false, message: msg(e), to: target })
+    }
+  }
+  return { ok: steps.length > 0 && steps.every((s) => s.ok), steps, ...(transitions ? { transitions } : {}), ...(status !== undefined ? { status, category } : {}) }
 }
 
 function msg(e) {

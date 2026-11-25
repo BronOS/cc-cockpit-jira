@@ -130,7 +130,8 @@ function recorder(o = {}) {
 test('write order: the transitions read again, then the comment, then the move; each step reported', async () => {
   const c = recorder()
   const r = await wr.performWrite({ client: c, key: 'ABC-1', comment: 'hi', transitionId: '21', expectStatus: 'to do' })
-  assert.deepEqual(c.log.map((x) => x[0]), ['transitions', 'header', 'comment', 'transition'])
+  // R1-3: read again after the comment, right before the move.
+  assert.deepEqual(c.log.map((x) => x[0]), ['transitions', 'header', 'comment', 'transitions', 'header', 'transition'])
   assert.equal(r.ok, true)
   assert.deepEqual(r.steps, [{ step: 'comment', ok: true }, { step: 'transition', ok: true, to: 'In Progress' }])
   assert.deepEqual(wr.stepLines('ABC-1', r.steps), ['ABC-1: comment posted', 'ABC-1: moved to In Progress'])
@@ -140,7 +141,7 @@ test('write order: the transitions read again, then the comment, then the move; 
   assert.deepEqual(only.log.map((x) => x[0]), ['comment'])
   const mv = recorder()
   assert.equal((await wr.performWrite({ client: mv, key: 'ABC-1', transitionId: '31' })).ok, true)
-  assert.deepEqual(mv.log.map((x) => x[0]), ['transitions', 'transition'])
+  assert.deepEqual(mv.log.map((x) => x[0]), ['transitions', 'header', 'transition'])
 })
 
 test('partial failure: a posted comment and a refused move each say so; a failed comment is never followed by the move', async () => {
@@ -259,4 +260,44 @@ test('client: 403 says the token may not write (write:jira-work); 400 shows Jira
   await assert.rejects(make(f400).transition('ABC-1', '41'), (e) => e.status === 400 && /moving ABC-1: Jira refused it \(400\): transitions refused; Resolution is required\./.test(e.message))
   const long = fakeJira({ routes: (url, init) => (init.method === 'POST' ? new Response(JSON.stringify({ errorMessages: ['x'.repeat(5000)] }), { status: 400 }) : undefined) })
   await assert.rejects(make(long).comment('ABC-1', 'hi'), (e) => e.message.length < 500)
+})
+
+// ---- review round 1 (codex sol/high) ----
+
+test('R1-3: the move is checked again after the comment; a status the comment moved refuses it', async () => {
+  // Comment automation (a rule) moves the issue to Blocked when the comment lands.
+  const c = recorder()
+  let moved = false
+  const comment = c.comment
+  c.comment = async (...a) => ((moved = true), comment(...a))
+  c.issueHeader = async (key) => (c.log.push(['header', key]), { key, fields: { status: { name: moved ? 'Blocked' : 'To Do' } } })
+  const r = await wr.performWrite({ client: c, key: 'ABC-1', comment: 'hi', transitionId: '21', expectStatus: 'To Do' })
+  assert.equal(r.ok, false)
+  assert.deepEqual(r.steps.map((s) => [s.step, s.ok]), [['comment', true], ['transition', false]])
+  assert.match(r.steps[1].message, /changed after the comment \(its status is now Blocked\)/)
+  assert.ok(!c.log.some((x) => x[0] === 'transition'), 'the saved move is not posted over the automation')
+  assert.equal(r.status, 'Blocked')
+})
+
+test('R1-2: a guard checked right before each POST stops the write (settings changed meanwhile)', async () => {
+  const c = recorder()
+  const r = await wr.performWrite({ client: c, key: 'ABC-1', comment: 'hi', transitionId: '21', guard: () => 'writing is off for this project' })
+  assert.equal(r.ok, false)
+  assert.equal(r.steps.length, 0)
+  assert.match(r.error, /writing is off.*nothing was written/)
+  assert.ok(!c.log.some((x) => x[0] === 'comment' || x[0] === 'transition'))
+  // Between the comment and the move: the comment stays reported, the move is not made.
+  let n = 0
+  const c2 = recorder()
+  const r2 = await wr.performWrite({ client: c2, key: 'ABC-1', comment: 'hi', transitionId: '21', guard: () => (n++ ? 'the Jira settings changed' : null) })
+  assert.deepEqual(r2.steps.map((s) => [s.step, s.ok]), [['comment', true], ['transition', false]])
+  assert.match(r2.steps[1].message, /not tried: the Jira settings changed/)
+  assert.ok(!c2.log.some((x) => x[0] === 'transition'))
+})
+
+test('R1-4: a 2xx whose body cannot be read is still a write that happened', async () => {
+  const jira = fakeJira({ routes: (url, init) => (init.method === 'POST' ? new Response('<html>proxy says hi', { status: 201 }) : undefined) })
+  assert.deepEqual(await make(jira).comment('ABC-1', 'hi'), { id: '' })
+  const broken = fakeJira({ routes: (url, init) => (init.method === 'POST' ? new Response(new ReadableStream({ pull: (ctl) => ctl.error(new Error('reset')) }), { status: 201 }) : undefined) })
+  assert.deepEqual(await make(broken).comment('ABC-1', 'hi'), { id: '' })
 })
