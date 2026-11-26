@@ -110,6 +110,7 @@ function start(ctx, io = {}) {
     }
     if (S.settings.ready) await loadSiteState()
     rebuild()
+    recheckAnnouncements()
   })().catch((e) => ctx.log.error('loading the stored state failed:', e && e.stack ? e.stack : e))
 
   /** The cache file and the seen marks of the configured site and email (from the last run). */
@@ -190,6 +191,7 @@ function start(ctx, io = {}) {
         S.errorKind = null
         if (!S.seen || S.seen.accountId !== S.cache.me.accountId) S.seen = loadSeen(await ctx.storage.get('seen').catch(() => undefined), cfg().site, S.cache.me.accountId)
         rebuild()
+        recheckAnnouncements()
         // First runs: what is there now counts as seen (seen.js explains when seeding ends).
         if (!S.seen.seeded) {
           const entries = allRows(S.view).filter((x) => x.issue.full).map((x) => ({ issue: x.issue, lane: x.lane }))
@@ -349,6 +351,7 @@ function start(ctx, io = {}) {
     lookups.clear()
     if (S.settings.ready) reschedule()
     rebuild()
+    recheckAnnouncements()
     postState()
     // A lane switched off or on, or the account gone: Inbox hears it now, not with the next poll.
     emitFeed()
@@ -641,6 +644,13 @@ function start(ctx, io = {}) {
 
   const partsOf = new Map() // parent overlay id -> { key, handle, page }
   const ANNOUNCE_KINDS = ['mail', 'event']
+  // Announcements that named no issue of a project we know yet (a mail opened before the first poll, or while the
+  // settings were not ready): kept by overlay id and looked at again after a poll, the stored state's load and a
+  // settings change (QA F6: onAnnounce decided once, and the mail never got its part). The app tells a listener of
+  // no announcement's end, so an entry goes when it gets a part, when a newer announcement of its overlay replaces it,
+  // or past PENDING_MAX (the oldest first); one whose overlay ended meanwhile is refused at part() and dropped then.
+  const pendingAnnounce = new Map() // overlay id -> announcement
+  const PENDING_MAX = 100
 
   /** The project keys this plugin knows: the polled issues' and the Mentioned setting's. */
   function knownProjects() {
@@ -672,6 +682,11 @@ function start(ctx, io = {}) {
     if (a.overlay.opener === ctx.pluginId) return
     const id = a.overlay.id
     const key = issueRefOf(a.refs)
+    pendingAnnounce.delete(id)
+    if (!key && Array.isArray(a.refs) && a.refs.length) {
+      pendingAnnounce.set(id, a)
+      if (pendingAnnounce.size > PENDING_MAX) pendingAnnounce.delete(pendingAnnounce.keys().next().value)
+    }
     const had = partsOf.get(id)
     if (had && had.key === key) return
     if (had) {
@@ -716,6 +731,12 @@ function start(ctx, io = {}) {
       },
       (e) => page.fail(cut(`Could not read ${key}: ${e && e.message ? e.message : e}`, 300))
     )
+  }
+
+  /** The kept announcements whose refs now name a known project's issue get their part (still checked by issueRefOf). */
+  function recheckAnnouncements() {
+    if (S.stopped || !pendingAnnounce.size || !S.settings.ready) return
+    for (const a of [...pendingAnnounce.values()]) if (issueRefOf(a.refs)) onAnnounce(a)
   }
 
   if (ctx.overlay && typeof ctx.overlay.onAnnounce === 'function' && typeof ctx.overlay.part === 'function') {

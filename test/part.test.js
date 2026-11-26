@@ -72,6 +72,39 @@ test('a known project\'s key gets one compact, read-only part; Open issue is the
   await h.stop()
 })
 
+test('F6: a mail announced before the first poll (or before the settings) gets its part once the issue is known', async () => {
+  const { ctx, h } = boot()
+  // Before any poll nothing names the ABC project: no part yet, the announcement is kept.
+  ctx.announce(mail(['ABC-1']))
+  ctx.announce({ ...mail(['ZZZ-9']), overlay: { id: 'ov-mail-2', opener: 'bronos.gmail', title: 'other' } })
+  await new Promise((r) => setTimeout(r, 10))
+  assert.deepEqual(ctx.parts, [])
+  await h.pollNow('test')
+  await until(() => ctx.parts.length === 1)
+  assert.deepEqual(ctx.parts[0].spec, { file: 'panels/part.html', title: 'Jira ABC-1', partOf: 'ov-mail-1' })
+  // Still checked against the known projects: ZZZ never is. A second poll adds nothing.
+  await h.pollNow('again')
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(ctx.parts.length, 1)
+  await h.stop()
+
+  // Not configured when the mail announced: the part comes with the settings (Mentioned names OPS) and the next poll.
+  const b = boot({ project: { site: '' } })
+  b.ctx.announce(mail(['OPS-7']))
+  await new Promise((r) => setTimeout(r, 10))
+  assert.deepEqual(b.ctx.parts, [])
+  await b.ctx.changeSettings({ ...CONFIGURED, mentionProjects: ['OPS'] })
+  await until(() => b.ctx.parts.length === 1)
+  assert.equal(b.ctx.parts[0].spec.title, 'Jira OPS-7')
+  // A newer announcement of that overlay naming nothing known detaches it; nothing comes back on a poll.
+  b.ctx.announce(mail(['nothing']))
+  await b.h.pollNow('test')
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(b.ctx.parts[0].closed, true)
+  assert.equal(b.ctx.parts.length, 1)
+  await b.h.stop()
+})
+
 test('a part the app refuses is logged and skipped; an old app never hears an announcement', async () => {
   const { ctx, h } = boot({ partRefuse: 'overlay: a part of this plugin is there already' })
   await h.pollNow('test')
