@@ -886,7 +886,7 @@ function start(ctx, io = {}) {
   // are the form's (a draft or another copy's edit that came in between refuses it): the click binds to what was shown.
 
   const forms = new Map() // issue key -> form
-  const FORMS_MAX = 50 // unsent forms kept; the oldest untouched one goes first
+  const FORMS_MAX = 50 // unsent forms kept; the oldest untouched one goes first (a form holding a draft is never one)
   const FORM_TEXT_MAX = 100000 // what a page may put in the comment box here (Post refuses past wr.MAX_COMMENT)
 
   function mayWriteOrNotice(from) {
@@ -904,14 +904,19 @@ function start(ctx, io = {}) {
   /** The transitions as the page lists them (plain data; the page builds the options with replylogic.moveOption). */
   const pageTransitions = (list) => list.map((t) => ({ id: t.id, name: t.name, to: t.to, enabled: t.enabled, why: t.why }))
 
-  /** The form of `key`, made empty when there is none (the oldest untouched one goes past FORMS_MAX). */
+  /**
+   * The form of `key`, made empty when there is none (the oldest untouched one goes past FORMS_MAX). Untouched means
+   * empty too: a `ccc jira update` draft is `edited: false` (no copy typed it), yet it is Claude's words waiting for
+   * the person (S10, a Reply draft survives Esc), so a form with a comment, a move or a marker is never dropped; past
+   * FORMS_MAX with nothing empty to drop, the map grows until a Post or a settings change empties forms.
+   */
   function formOf(key) {
     let form = forms.get(key)
     if (form) return form
     form = { key, comment: '', transitionId: '', marker: '', asked: '', edited: false, busy: false, v: 0, loaded: false, loading: null, loadError: '', status: '', tone: 'neutral', transitions: [], note: null }
     forms.set(key, form)
     if (forms.size > FORMS_MAX) {
-      const old = [...forms.values()].find((f) => f !== form && !f.edited && !f.busy && !windows.has(f.key))
+      const old = [...forms.values()].find((f) => f !== form && !f.edited && !f.busy && !windows.has(f.key) && !f.comment && !f.transitionId && !f.marker)
       if (old) forms.delete(old.key)
     }
     return form

@@ -154,6 +154,27 @@ test('Reply draft survives Esc', async () => {
   await h.stop()
 })
 
+test('N1: a ccc jira update draft is never evicted: 50 other Reply opens after Esc keep it', async () => {
+  const { ctx, h, jira } = boot({ sessions: [{ tabId: 't1', status: 'working', cwd: '/p', notes: [], files: [], name: 'Checkout fix' }] })
+  await h.pollNow('test')
+  assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'Claude drafted this.', tabId: 't1' })).code, 0)
+  windowsOf(ctx)[0].close() // Esc: the draft waits in the host's form, untyped (edited: false)
+  // Past FORMS_MAX (50) untouched forms of other issues: each Reply opens a form, then the window goes.
+  for (let n = 2; n <= 52; n++) {
+    await ctx.sendPanel({ type: 'reply', key: `ABC-${n}` }, OWNER)
+    windowsOf(ctx).at(-1).close()
+  }
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  const o = windowsOf(ctx).at(-1)
+  o.connect(OWNER)
+  await until(() => replyOf(o), 500).catch(() => {})
+  assert.ok(replyOf(o), "the issue's form is still kept (an evicted one sends no form at connect)")
+  assert.equal(replyOf(o).comment, 'Claude drafted this.', "Claude's draft is still there")
+  assert.equal(replyOf(o).marker, 'Draft from Claude (Checkout fix)')
+  assert.equal(jira.writes.length, 0)
+  await h.stop()
+})
+
 test('two views see one draft', async () => {
   const { ctx, h, jira } = boot()
   await h.pollNow('test')
