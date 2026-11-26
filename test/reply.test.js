@@ -175,6 +175,36 @@ test('N1: a ccc jira update draft is never evicted: 50 other Reply opens after E
   await h.stop()
 })
 
+test('r2 n3: drafts have a cap: past 200 forms the oldest ccc draft goes', async () => {
+  // 201 issues the fake Jira knows (a draft is filled only for an issue it could read).
+  const issues = {}
+  for (let n = 1; n <= 201; n++) {
+    const raw = fixture('issue-ABC-1.json')
+    raw.key = `ABC-${n}`
+    issues[raw.key] = raw
+  }
+  const { ctx, h } = boot({ jira: { issues }, sessions: [{ tabId: 't1', status: 'working', cwd: '/p', notes: [], files: [], name: 'Loop' }] })
+  await h.pollNow('test')
+  const draft = async (n) => {
+    assert.equal((await ctx.runCli(['update', `ABC-${n}`, '-'], { stdin: `draft ${n}`, tabId: 't1' })).code, 0)
+    windowsOf(ctx).at(-1).close()
+  }
+  for (let n = 1; n <= 201; n++) await draft(n)
+  const kept = async (n) => {
+    await ctx.sendPanel({ type: 'open', key: `ABC-${n}` })
+    const o = windowsOf(ctx).at(-1)
+    o.connect(OWNER)
+    await until(() => replyOf(o), 300).catch(() => {})
+    const r = replyOf(o)
+    o.close()
+    return r ? r.comment : null
+  }
+  assert.equal(await kept(1), null, 'the oldest draft went past the cap')
+  assert.equal(await kept(2), 'draft 2')
+  assert.equal(await kept(201), 'draft 201')
+  await h.stop()
+})
+
 test('two views see one draft', async () => {
   const { ctx, h, jira } = boot()
   await h.pollNow('test')

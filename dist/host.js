@@ -908,6 +908,7 @@ function start(ctx, io = {}) {
 
   const forms = new Map() // issue key -> form
   const FORMS_MAX = 50 // unsent forms kept; the oldest untouched one goes first (a form holding a draft is never one)
+  const DRAFTS_MAX = 200 // forms kept at all: past it the oldest draft goes (Claude's first, then the person's)
   const FORM_TEXT_MAX = 100000 // what a page may put in the comment box here (Post refuses past wr.MAX_COMMENT)
 
   function mayWriteOrNotice(from) {
@@ -929,7 +930,9 @@ function start(ctx, io = {}) {
    * The form of `key`, made empty when there is none (the oldest untouched one goes past FORMS_MAX). Untouched means
    * empty too: a `ccc jira update` draft is `edited: false` (no copy typed it), yet it is Claude's words waiting for
    * the person (S10, a Reply draft survives Esc), so a form with a comment, a move or a marker is never dropped; past
-   * FORMS_MAX with nothing empty to drop, the map grows until a Post or a settings change empties forms.
+   * FORMS_MAX with nothing empty to drop, the map grows, up to DRAFTS_MAX (review r2 n3: a cap all the same, so a
+   * Claude in a loop of `ccc jira update` cannot grow it for good); past that the oldest form with no window and no
+   * Post running goes, a ccc draft before one the person typed in.
    */
   function formOf(key) {
     let form = forms.get(key)
@@ -938,6 +941,11 @@ function start(ctx, io = {}) {
     forms.set(key, form)
     if (forms.size > FORMS_MAX) {
       const old = [...forms.values()].find((f) => f !== form && !f.edited && !f.busy && !windows.has(f.key) && !f.comment && !f.transitionId && !f.marker)
+      if (old) forms.delete(old.key)
+    }
+    if (forms.size > DRAFTS_MAX) {
+      const free = [...forms.values()].filter((f) => f !== form && !f.busy && !windows.has(f.key))
+      const old = free.find((f) => !f.edited) || free[0]
       if (old) forms.delete(old.key)
     }
     return form
