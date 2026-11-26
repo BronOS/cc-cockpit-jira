@@ -11,12 +11,16 @@ poll and Refresh (an icon) in the panel's title bar on cc-cockpit 0.9.0+ (`ctx.p
 service to other plugins (section "The jira service"); no app change needed.
 0.8.0 (designed with the user on 2026-11-24): writes to Jira, a comment and a status change, always
 checked by the person by default (section "Writing to Jira"). Read-only before it.
+0.9.0 (the Overlay foundation team run, 2026-11-26): the issue opens in its own window (a perView overlay
+drawn with cc-cockpit's overlay kit, vendored): notes, Ask and Reply in a side column; the reviewer and the
+reply page are gone; parts beside other plugins' windows; the `jira` service v2 (`openIssue`).
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
 seen state, hints and floor), and the triage design in `~/Projects/cc-cockpit-jev-triage/docs/design.md`.
 
-Manifest: `services: { provides: { jira: 1 }, uses: { triage: 1, reviewer: 1 } }`; a panel (left or right zone, the
+Manifest: `services: { provides: { jira: 2, 'inbox-feed': 2 }, uses: { triage: 1 } }`, `overlays: { perView: true }`,
+`guests: { aware: true }`; a panel (left or right zone, the
 person's choice; default right) with lanes; CLI `ccc jira`.
 
 ## Auth and settings (project scope: a work project and a personal one use different sites)
@@ -48,8 +52,8 @@ person's choice; default right) with lanes; CLI `ccc jira`.
 - `triageText`: `full` (default: description and comments go to Jev) or `summary` (only key,
   summary, status, priority, type: for employers who object to issue text leaving).
 - `writes` (0.8.0, global value plus a per-project override like every project field): what
-  `ccc jira update` does. `draft` (default, "Claude drafts, I post"): it opens the reply page
-  filled in and writes nothing; `direct` ("ccc writes directly"): it writes; `off` ("Read-only"):
+  `ccc jira update` does. `draft` (default, "Claude drafts, I post"): it fills Reply in the issue
+  window and writes nothing; `direct` ("ccc writes directly"): it writes; `off` ("Read-only"):
   the command is refused and the panel offers no Reply (the plugin as before 0.8.0, for an employer
   that wants no writes). A scoped token needs `write:jira-work` too for any write.
 - `mailSenders` (0.5.0): the addresses the site's notification mails come from, for the `jira`
@@ -112,7 +116,7 @@ others' activity, `newCount`).
 
 Lanes as collapsible sections (only the enabled ones), each row: key, summary, status, a triage
 dot (priority colour, hollow below 0.5 confidence), unread mark, assignee or "mentioned by X".
-A click on a row opens the issue (the overlay); so does Enter or Space on a focused row (each row
+A click on a row opens the issue (its window); so does Enter or Space on a focused row (each row
 is one tab stop; ↑ / ↓ / Home / End move between rows). The other actions are small buttons shown
 while the row is hovered or has the focus inside it (in the DOM all the time, only faded out, so
 Tab reaches them): ↗ (open in the browser: `ctx.openExternal` on cc-cockpit 0.9.1+, else ctx.exec of
@@ -123,32 +127,51 @@ New (session). The pure decisions (which buttons, which key does what) are in
 focus back on the same row or button. A header with the last poll time, a refresh button, and
 errors (auth, network) as a notice.
 
-## Discuss with Claude (the reviewer overlay)
+## The issue window (0.9.0)
 
-- Open: `ctx.services.use('reviewer').annotate({ title: '<KEY>: <summary>', html, assets, url,
-  key: 'jira:<KEY>', tabId })`: the issue as HTML with its images (section "The issue view").
-  The person selects text to add notes (they anchor on the quoted text), writes a global comment,
-  and presses Discuss (the currently open Claude tab by default) or New session. Opening marks the
-  issue read. annotate and its HTML mode come with the bundled reviewer in cc-cockpit 0.8.0, so
-  the call falls back, once per step and remembered for the run:
-  1. `annotate({ html, assets })` rejects with anything but "has no method": a reviewer whose
-     annotate takes text only (early 0.8.0 builds). Retry as `annotate({ text })` with the readable
-     plain text (header fields, description, comments and changes oldest first, the new ones
-     marked `[new]`). Only when that works is "html refused" remembered; when it fails too the
-     person sees the error and the next open tries html again.
-  2. `service "reviewer" (plugin P) has no method "annotate"` (0.7.x), or no reviewer at all
-     (`ctx.services.available('reviewer')` false): the plugin's own overlay page
-     (`panels/issue.html`, below).
-- Discuss / New session row buttons without annotations: `ctx.sessions.send(activeTabId, text)`
-  (the tab with `SessionInfo.active`, else ask: the only live tab, else show an error) and
-  `ctx.sessions.open({ prompt })`, with a prompt that starts `About Jira <KEY>: <summary>` (never
-  `/`, `!`, `#`, `&`) and carries the same issue text, capped.
+- One perView overlay per issue (`panels/issue.html`, `kind: 'html'`, `size: 'large'`), started before the
+  issue is read: `notes: { key: 'jira:<KEY>' }` (core keeps the notes, D14 keeps Ask sessions), type
+  `inbox-item { source: 'bronos.jira', id }`, one toolbar button "Open in Jira ↗". Drawn with the vendored
+  kit (`vendor/cc-kit`, D9): the host's `makePage` sends each copy its own projection of one state
+  (`{ key, summary, url, html, assets, reply }`, `reply` true only for a copy that may reply), chunked
+  under the page message cap; the page's `ccKit.connect` draws the document, `mountNotes`,
+  `mountGlobalNote`, `mountAsk` and the side tabs (Ask, Reply; D7: the first tab is the last one used, a
+  draft opens Reply). Layout A: the document left, the side column right; no `innerHTML` anywhere.
+- Copies: `handle.onConnect(from)` with `from = { view, access, person?, copy }` filled by main. A copy
+  with `access` owner or write (and writes on) gets the Reply form; a read guest's copy gets neither the
+  tab nor any reply or draft message. A missing `from` is refused everywhere (no owner default).
+- One window per issue: a second open focuses it. A failed read is the kit's error page with Try again (the
+  owner's; a guest gets fixed text); the panel gets the notice. An app without `onConnect` (before 0.27.0)
+  fails closed: the overlay is closed, the panel says which version it needs.
+- `onDiscuss` sends `discussPrompt` (key, summary, status, the latest comment); `onAsk` hands core the
+  `readableText` for the owner and write guests, null for a read guest. An app without `ctx.notes` /
+  `onAsk` (0.27.x) still opens the window; Discuss works.
+- `markReadOnOpen`: marked read once an owner copy had the issue drawn (a guest looking is not the person).
+- Links: the kit's `cc-kit.link` opens only a URL that is in the document, with `ctx.openExternal(url,
+  { view })` on the clicking view.
+- Discuss / New session row buttons: `ctx.sessions.send(activeTabId, text)` (the tab with
+  `SessionInfo.active`, else ask: the only live tab, else show an error) and `ctx.sessions.open({ prompt })`,
+  with a prompt that starts `About Jira <KEY>: <summary>` (never `/`, `!`, `#`, `&`) and carries the
+  issue text, capped.
+
+## Parts (0.9.0, D13)
+
+- `ctx.overlay.onAnnounce('mail' | 'event', fn)`: another plugin's window says what it shows, with refs.
+  At most 20 refs of at most 200 chars are looked at; the first that is an issue key (`issueKey`) of a
+  known project (`mentionProjects`, the projects of the lanes' issues, the cached issues) gets
+  `ctx.overlay.part(overlay.id, { file: 'panels/part.html', title: 'Jira <KEY>' })`. Our own windows
+  are skipped. Anything else attaches nothing and reads nothing from Jira.
+- The part is compact and read-only: key, summary, status lozenge, priority, type, assignee (from the
+  `issue` service lookup), Open in Jira ↗, and Open issue for the owner only (a message from another
+  copy is ignored). Its own `onDiscuss` / `onAsk` give the issue's text (Ask: owner and write guests).
+- A new announcement naming another key replaces the part; one naming none closes it. A part the app
+  refuses is logged and skipped. An app without `onAnnounce` / `part` gets no listener.
 
 ## The issue view (0.2.0)
 
 - Built from the ADF of a fresh read (`lib/adfhtml.js`, `lib/document.js`), never from Jira's
   rendered HTML, and safe by construction: every text and attribute value escaped; only the
-  reviewer's allow-list tags and classes are written (header card `div.card` with `h1` and
+  kit's allow-list tags and classes are written (header card `div.card` with `h1` and
   `div.meta`, comments as `div.card` with `div.card-header` and `.new`, `ul.attachment-list`,
   panels `div.jira-panel.jira-panel-<info|note|warning|error|success>`, `span.mention`,
   `span.status.lozenge`); no style attribute (colours in the ADF are dropped); links only http(s)
@@ -163,7 +186,7 @@ errors (auth, network) as a notice.
   downloaded image the text does not show is a figure in the list, the rest are links.
 - Images (`lib/images.js`): raster types only (png, jpeg, gif, webp, checked by magic number on
   the bytes), newest first, at most 15, each at most 700 KiB raw (716,800 bytes: a dataUrl of at
-  most 955,759 chars, under the reviewer's 1,000,000), all dataUrls at most 7.5 MiB (under 8 MiB);
+  most 955,759 chars, under 1,000,000), all dataUrls at most 7.5 MiB;
   an attachment without a size is budgeted at the maximum. Downloads 3 at a time, the open waits at
   most 10 s for them; none starts after that, the running ones finish into the cache (20 s each at
   most) for the next open. With the cached copy (Jira unreachable) only cached images show.
@@ -174,19 +197,18 @@ errors (auth, network) as a notice.
   that chain), https only, at most 3 redirects, the body read with a byte limit.
 - Cache: `<dataDir>/images/<site hash>-<id>.img` (0600, the folder 0700), at most 300 files and
   64 MiB, least recently used first.
-- Size: at most 2,000,000 bytes of HTML (the reviewer's cap is 2 MiB); a description over 1 MB of
+- Size: at most 2,000,000 bytes of HTML; a description over 1 MB of
   markup becomes its plain text; comments that do not fit give way oldest first, with a line.
-- The fallback page (`panels/issue.html`) gets the same HTML in parts of 400,000 chars (a page
-  message is at most 1,040,384 chars of JSON) and one message per image, keeps only the builder's
-  tags and attributes again (second line of defence), sets an image's src only to a
-  `data:image/(png|jpeg|gif|webp);base64,` URL, and posts a link click as `{ open }`, which the
-  host opens with xdg-open/open when it is http(s).
+- The window (0.9.0) gets the HTML and the images as data URLs in the kit's state, chunked under the
+  page message cap (1,040,384 chars of JSON); the kit's `renderDocument` keeps only its allow-list again
+  (second line of defence) and sets an image only from a `data:image/...` asset. Since 0.9.0 the header
+  card is folded (`fold`): the h1, the key facts, then `<details><summary>More details` with the rest.
 - `ccc jira show`, Discuss, New session and triage keep the plain text (`readableText`,
   `triageText`).
 
-## The jira service (v1, 0.5.0)
+## The jira service (v1, 0.5.0; v2, 0.9.0)
 
-`ctx.services.provide('jira', { site, issue, document })` in activate. The first consumer is
+`ctx.services.provide('jira', { site, issue, document, openIssue })` in activate. The first consumer is
 bronos.gmail (Jira mail: triage hints, the issue below the mail); any plugin of the project can
 use it. A call is a plain call inside the plugin host (`ccc guide api`, services: no rate, size or
 time limit from the app), so this plugin checks and caps its callers itself (`lib/service.js`):
@@ -205,7 +227,7 @@ time limit from the app), so this plugin checks and caps its callers itself (`li
   the issue is the person's, else null. A settings change empties the cache.
 - `document(key, { maxHtmlBytes?, maxImages?, maxImageChars?, waitMs? })` -> `{ key, title, url,
   html, aside, assets, stale? }`: `fullIssue` (fresh read, cached copy on failure) and `issueView`
-  with the details column, exactly the reviewer's document. The options can only lower the
+  with the details column (the styled document 0.8.0's reviewer showed). The options can only lower the
   plugin's own budgets (2,000,000 bytes, 15 images, 7.5 MiB of data URLs, 10 s wait): `issueDocument`
   takes `maxBytes` (the description at most half of it, else its text, else a note), `selectImages`
   / `gatherImages` the image count and total. Not marked read: another plugin showing the issue is
@@ -217,12 +239,16 @@ time limit from the app), so this plugin checks and caps its callers itself (`li
   busy ...`, `jira: too many ... a minute`), with a log line naming `ctx.services.caller()` (read
   before the method's first await). Errors are thrown as `jira: <message>`; the client's messages
   carry no token.
-- Not configured: `issue` and `document` reject with `jira: the Jira plugin is not configured in
+- `openIssue(key, { reply? })` (v2, 0.9.0) -> `{ opened: true }`: the issue window as a row click opens it
+  (focused when open); `reply: true` (exactly) selects Reply when writes are on. For another plugin's "Open
+  issue" (Gmail). Errors as `jira: <message>`.
+- Not configured: `issue`, `document` and `openIssue` reject with `jira: the Jira plugin is not configured in
   this project (<missing fields>)`.
 
 ## Writing to Jira (0.8.0)
 
-A comment and a status change on one issue, together or alone. The person writes from the reply page;
+A comment and a status change on one issue, together or alone. The person writes from the Reply tab of the
+issue window (0.8.0: a separate reply page);
 Claude (any `ccc` caller) prepares one with `ccc jira update`, and with `writes: draft` the person makes the
 final decision there.
 
@@ -231,7 +257,7 @@ Why the plugin decides and not Claude's side (agreed 2026-11-24): issue text rea
 competes with; Claude Code's permission rules (`Bash(ccc jira update:*)` as ask) are a good extra layer per
 project but are walked around by `sh -c` or a script and skipped in auto and bypass modes. The setting is
 read in the plugin host on every call, for every caller: `CliCall.tabId` tells a Claude tab, but a Claude
-that unsets its token looks like the person's shell, so the rule is "ccc drafts, the page writes", not
+that unsets its token looks like the person's shell, so the rule is "ccc drafts, the window writes", not
 "Claude drafts". Not a boundary (Claude runs as the person's OS user, and could call the REST API with the
 token if it found it); it keeps a prompt-injected Claude from writing to Jira unseen.
 
@@ -241,7 +267,7 @@ token if it found it); it keeps a prompt-injected Claude from writing to Jira un
   starts a paragraph, a single newline is a `hardBreak`; nothing is parsed as markup and there are no
   mentions (they need account ids). At most 32,000 characters (Jira's limit is 32,767), refused before the call.
 - Transitions: `GET /rest/api/3/issue/<KEY>/transitions?expand=transitions.fields`, read fresh each time
-  the page opens or a Move is about to run (workflows differ per project and per status). A transition
+  the Reply tab is first opened or a Move is about to run (workflows differ per project and per status). A transition
   with a required field that has no default (a resolution screen) is listed but disabled, with "needs
   fields: open in Jira". `POST /rest/api/3/issue/<KEY>/transitions` with `{ transition: { id } }`.
 - Same guards as the reads: the client's own base only (site or gateway), https, no redirect followed on
@@ -249,40 +275,49 @@ token if it found it); it keeps a prompt-injected Claude from writing to Jira un
   token needs write:jira-work"); a 400 shows Jira's `errorMessages` / `errors`, cut.
 - Order when both are asked: the comment first, then the transition, so a comment that explains a move
   is never missing after it. Each step reports on its own: a failed transition after a posted comment
-  says so, and the page keeps the status choice for a retry (the comment box is cleared, it is posted).
+  says so, and the form keeps the status choice for a retry (the comment box is cleared, it is posted).
 - After a write: the issue is read again (store and lanes), its seen mark set to the new `updated` (the
   person's own change is never unread; unread already ignores the person's own comments), and the feed
   emits its item. The `jira` service gets no write methods (Left out).
 
-### The reply page (`panels/reply.html`, the plugin's own html overlay)
+### The Reply tab (0.9.0; 0.8.0's reply page, folded into the issue window)
 
-- Opened by the panel row's new Reply button (hover, like Discuss), by a Reply button in the issue
-  overlay's toolbar (`ctx.overlay.buttons` on the `inbox-item` type, the same check as the item buttons:
-  only on overlays we or our reviewer opened), and by `ccc jira update` in draft mode. Not offered when
-  `writes` is `off`.
-- Shows the key, summary and current status (a lozenge), the "Move to" choice (Keep status first, then
-  the enabled transitions by name, with the target status when it differs from the name), and the
-  comment box. One button, its label from the choice: Post comment, Move, or Post and move; disabled
-  while nothing would happen. Ctrl/Cmd+Enter does not send: the click is the decision.
-- A draft from `ccc` is marked "Draft from Claude" with the tab's name when the caller was a Claude tab
-  (`CliCall.tabId`, the app's own value), else "Draft from ccc". The person edits freely; nothing is sent
-  until the click.
-- One reply page per issue. A new draft for an issue whose page is open replaces it when the person has
-  not edited it; when they have, the draft is refused ("the person is editing a reply to <KEY>") and the
-  page is left alone.
-- Moved meanwhile: the Move re-reads the transitions; when the chosen one is gone, nothing is written (the
-  comment neither), the list refreshes and the page says the status changed.
+- Opened by the panel row's Reply button (hover, like Discuss), by choosing the tab, and by `ccc jira
+  update` in draft mode (D7: a draft opens Reply). Not offered when `writes` is `off`. No toolbar Reply or
+  send button any more: Post is in the tab.
+- Shows the current status (a lozenge), the "Move to" choice (Keep status first, then the enabled
+  transitions by name, with the target status when it differs from the name), and the comment box. One
+  button, its label from the choice: Post comment, Move, or Post and move; disabled while nothing would
+  happen. Ctrl/Cmd+Enter does not send: the click is the decision.
+- One form per issue, held by the host (at most 50, the oldest untouched one evicted), not by a page: kept
+  over Esc and shown again when the issue is reopened. Synced to every owner and write copy: an `edit`
+  from a copy sets the form (last write wins, a version `v` counts changes) and goes to the other copies;
+  the typing copy gets `own: true` and keeps its own fields. "Edited" means any copy typed.
+- Post: accepted only from `from.access` owner or write (a missing `from` refuses), with writes on, the
+  form loaded and not busy, and only when the values the copy sends equal the form. The messages of one
+  port are ordered, so a copy's own edits arrive before its Post; a Post made on words another copy or a
+  draft has changed meanwhile writes nothing ("the draft just changed"). This replaces 0.8.0's
+  toolbar-collect revision check.
+- A draft from `ccc` is marked "✎ Draft from Claude" with the tab's name when the caller was a Claude tab
+  (`CliCall.tabId`, the app's own value), else "✎ Draft from ccc". A new draft replaces an untouched form;
+  an edited (or busy) one refuses it ("the person is editing a reply to <KEY>: their words were left
+  alone"). A fill is applied only when `v` did not change during its reads, so typing during a draft's read
+  wins.
+- An Ask answer never fills Reply: the page sets the comment box only from the host's `reply` message
+  (`replyFields`, `panels/replylogic.js`).
+- Moved meanwhile: the Post re-reads the transitions; when the chosen one is gone, nothing is written (the
+  comment neither), the list refreshes and the tab says the status changed.
 - The owner and write guests (Oleg, 2026-11-25: "with write access, yes"): the plugin is hidden from
-  guests unless shown; even shown, a read guest gets no Reply and a write needs `access: write`, checked
-  by the host on every click from `from.access`.
+  guests unless shown; even shown, a read guest gets no Reply tab, no form and no draft, and the host
+  refuses its Post by `from.access`.
 
 ### `ccc jira update <KEY> [--status <name>] [-]`
 
 - The comment comes on stdin with `-` (bounded like every plugin command's stdin), the status by
   transition name or target status name, case-insensitive. Either may be left out, not both.
-- `draft`: opens the reply page with both filled in and answers at once, without waiting for the
+- `draft`: fills Reply in the issue window with both, opens the window on Reply and answers at once, without waiting for the
   person (plugin commands are bounded to 30 s): "Draft opened for <KEY>: the person posts it." A
-  status that matches no transition, or a disabled one, still opens the page with Keep status and a
+  status that matches no transition, or a disabled one, still opens Reply with Keep status and a
   line naming what was asked and what is possible; the answer says so too.
 - `direct`: writes (comment, then transition) and answers what happened step by step; an unknown or
   disabled status is refused before anything is written, with the list of possible ones.
