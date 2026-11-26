@@ -1,10 +1,9 @@
 'use strict'
-// The reply page's decisions, kept free of the DOM so node:test can check them (test/reply.test.js
-// requires this file; panels/reply.html loads it as a classic script before reply.js, where these
-// become globals). The host requires it too, for the label of the toolbar button: the page and the
-// toolbar must never disagree on what the click does.
+// The Reply tab's decisions (the issue window, panels/issue.js), kept free of the DOM so node:test can
+// check them (test/reply.test.js requires this file; panels/issue.html loads it as a classic script
+// before issue.js, where these become globals). The host requires it too (keepChoice).
 //
-// One button, its label from the choice (design "The reply page"): Post comment, Move, or Post and
+// One button, its label from the choice (design "The reply page", now the Reply tab): Post comment, Move, or Post and
 // move; disabled while nothing would happen. There is no keyboard shortcut for it (no Ctrl/Cmd+Enter):
 // the click is the person's decision, and a chord typed out of habit in the comment box is not one.
 
@@ -46,4 +45,16 @@ function keepChoice(transitions, transitionId) {
   return transitionId && transitions.some((t) => t.id === transitionId && t.enabled) ? transitionId : ''
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { REPLY_MAX_COMMENT, commentLength, replyAction, moveOption, keepChoice }
+/**
+ * What the page's form takes from the host's `{ type: 'reply' }` message (the one form per issue the host
+ * keeps for every owner and write copy): `{ comment, transitionId }`, or null when it takes no field.
+ * `own` answers this copy's own edit (it may have typed on since: its fields stay). Only a `reply`
+ * message ever fills the form: an Ask answer, a note or any other push never does (design: an Ask
+ * answer never fills Reply or any write by itself).
+ */
+function replyFields(m) {
+  if (!m || typeof m !== 'object' || m.type !== 'reply' || m.own === true) return null
+  return { comment: typeof m.comment === 'string' ? m.comment : '', transitionId: typeof m.transitionId === 'string' ? m.transitionId : '' }
+}
+
+if (typeof module !== 'undefined' && module.exports) module.exports = { REPLY_MAX_COMMENT, commentLength, replyAction, moveOption, keepChoice, replyFields }

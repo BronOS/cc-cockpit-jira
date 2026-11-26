@@ -10,7 +10,7 @@ const feed = require('../dist/lib/feed')
 const { header } = require('../dist/lib/model')
 const { current } = require('../dist/lib/poll')
 const { mentionedBy } = require('../dist/lib/triage')
-const { fakeJira, fakeCtx, fakeTriage, NOW, CONFIGURED } = require('./fakes')
+const { fakeJira, fakeCtx, fakeTriage, kitView, NOW, CONFIGURED, OWNER, READER } = require('./fakes')
 
 const issue = (key, o = {}) => ({ key, project: key.split('-')[0], summary: `Summary of ${key}`, status: 'In Progress', priority: 'High', type: 'Bug', assignee: 'Oleg Example', reporter: 'Ann Smith', updated: '2026-11-02T10:00:00.000+0000', updatedAt: NOW - 3600000, events: [], description: '', full: true, ...o })
 const row = (key, o = {}) => ({ issue: issue(key, o.issue), lane: o.lane || 'inProgress', unread: Boolean(o.unread), newCount: o.unread ? 1 : 0, verdict: o.level ? { priority: o.level } : null })
@@ -181,9 +181,9 @@ test('the due date is read from the header', () => {
 
 function boot(opts = {}) {
   const jira = fakeJira(opts.jira)
-  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: fakeTriage(), reviewer: opts.reviewer, sessions: opts.sessions })
+  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: fakeTriage(), sessions: opts.sessions, overlayRefuse: opts.overlayRefuse })
   if (opts.mutate) opts.mutate(ctx)
-  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: 0 })
+  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: 0, overlaySettleMs: 10 })
   const impl = () => ctx.provided['inbox-feed']
   return { jira, ctx, h, impl }
 }
@@ -303,90 +303,51 @@ test('act refuses a bad argument, a foreign key and an action the item lacks; no
   await h.stop()
 })
 
-test('act open: a listed key opens its issue view, as a row click does', async () => {
-  const calls = []
-  const reviewer = { annotate: async (a) => (calls.push(a), { ok: true }) }
-  const { ctx, h } = boot({ reviewer })
-  await h.pollNow('test')
-  await h.S.classifying
-  assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  // A reviewer without prepare: nothing is on screen before the annotate, so act answers after it.
-  await until(() => calls.length === 1)
-  assert.equal(calls[0].key, 'jira:ABC-1')
-  await h.stop()
-})
+const ON = { ...CONFIGURED, markReadOnOpen: true }
+const readOf = async (b, key) => (await b.ctx.callService('inbox-feed', 'snapshot')).items.find((i) => i.id === key).read
 
-test('act open without a reviewer: the plugin\'s own page', async () => {
+test('act open: a listed key opens its issue window, as a row click does', async () => {
   const { ctx, h } = boot()
   await h.pollNow('test')
   await h.S.classifying
-  const before = ctx.overlays.length
   assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  assert.ok(ctx.overlays.length > before)
+  assert.equal(ctx.overlays.length, 1)
+  assert.equal(ctx.overlays[0].spec.file, 'panels/issue.html')
+  assert.deepEqual(ctx.overlays[0].spec.notes, { key: 'jira:ABC-1' })
   await h.stop()
 })
 
-// Round-2 review: act answered ok before anything was on screen, so a failed read went only to this
-// panel's notice and Inbox ended the item's "back" mark for an open the person never saw.
-test('act open with nothing on screen yet (a reviewer without prepare, or a prepare that failed): a failed read is the act\'s refusal', async () => {
-  const calls = []
-  const annotate = async (a) => (calls.push(a.key), { opened: true })
-  const reviewers = {
-    'no prepare': { annotate },
-    'prepare failed': {
-      prepare: async () => {
-        throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
-      },
-      cancel: async () => ({ closed: false }),
-      annotate,
-    },
-  }
-  for (const [name, reviewer] of Object.entries(reviewers)) {
-    const jira = {}
-    const { ctx, h } = boot({ reviewer, jira })
-    await h.pollNow('test')
-    await h.S.classifying
-    // The issue is gone at Jira by the time it is opened, with no cached copy to fall back on.
-    jira.fail = { 'ABC-1': 404 }
-    const cached = h.S.cache.issues['ABC-1']
-    delete h.S.cache.issues['ABC-1']
-    const r = await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
-    assert.equal(r.ok, false, name)
-    assert.match(r.message, /^jira: .*nope/, name)
-    assert.deepEqual(calls, [], `${name}: nothing was annotated`)
-    assert.equal(ctx.overlays.length, 0, `${name}: no reader page either`)
-    // The same reviewer opens an issue that can be read: ok once the reviewer's overlay is filled.
-    delete jira.fail
-    h.S.cache.issues['ABC-1'] = cached
-    assert.deepEqual(await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true }, name)
-    assert.deepEqual(calls.splice(0), ['jira:ABC-1'], name)
-    await h.stop()
-  }
+// The window is on screen before the read (the kit page shows its own loading), so act answers ok then; a read
+// that fails is the window's error page with Try again, and the issue stays unread.
+test('act open: a read that fails leaves the window with its error; act was ok (it was on screen); unread until shown', async () => {
+  const jira = {}
+  const b = boot({ jira, project: ON })
+  await b.h.pollNow('test')
+  await b.h.S.classifying
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
+  jira.fail = { 'ABC-1': 404 }
+  const cached = b.h.S.cache.issues['ABC-1']
+  delete b.h.S.cache.issues['ABC-1']
+  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  const o = b.ctx.overlays[0]
+  o.connect(OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'failed')
+  assert.match(kitView(o, 'c-owner').failed.message, /^Could not load the issue: /)
+  assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
+  assert.equal(b.h.S.notice.kind, 'error', 'the panel says it too')
+  // Try again (the owner's) reads it, and now it was shown.
+  delete jira.fail
+  b.h.S.cache.issues['ABC-1'] = cached
+  o.send({ type: 'cc-kit.retry' }, OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
+  assert.equal(await readOf(b, 'ABC-1'), true)
+  await b.h.stop()
 })
 
-// Round-3 review: an open that ended without anything on screen (the reviewer refused the issue, or
-// the app refused the reader page) set the panel's notice and returned, and act still answered ok.
-test('act open: a reviewer (without prepare) refusing the issue is the act\'s refusal, with the notice\'s text', async () => {
-  const calls = []
-  const reviewer = {
-    annotate: async (a) => {
-      calls.push(a.key)
-      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
-    },
-  }
-  const { ctx, h } = boot({ reviewer })
-  await h.pollNow('test')
-  await h.S.classifying
-  const r = await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
-  assert.equal(r.ok, false)
-  assert.match(r.message, /^jira: The reviewer could not open ABC-1: .*at most 3 open/)
-  assert.deepEqual(calls, ['jira:ABC-1', 'jira:ABC-1'], 'html, then text')
-  assert.equal(h.S.notice.kind, 'error', 'the panel says it too')
-  assert.equal(ctx.overlays.length, 0)
-  await h.stop()
-})
-
-test('act open: the app refusing our reader page is the act\'s refusal, with the notice\'s text', async () => {
+// Round-3 review: an open that ended without anything on screen set the panel's notice and returned, and act
+// still answered ok.
+test('act open: the app refusing the window (start throws) is the act\'s refusal, with the notice\'s text', async () => {
   const { ctx, h } = boot({
     mutate: (c) => {
       c.overlay.start = () => {
@@ -398,144 +359,41 @@ test('act open: the app refusing our reader page is the act\'s refusal, with the
   await h.S.classifying
   const r = await ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
   assert.equal(r.ok, false)
-  assert.match(r.message, /^jira: Cannot open the reader: overlay: at most 3 open/)
+  assert.match(r.message, /^jira: .*overlay: at most 3 open/)
   await h.stop()
 })
 
-// Round-4 review: main never throws from start(); its refusal (3 open, 10 a minute) rejects the
-// handle's result a moment later, and act answered ok for a reader page that never opened. And the
-// issue was marked seen (read: true to Inbox) right after the read, before anything was shown.
-const ON = { ...CONFIGURED, markReadOnOpen: true }
-const readOf = async (b, key) => (await b.ctx.callService('inbox-feed', 'snapshot')).items.find((i) => i.id === key).read
-
-test('act open: a reader page whose result rejects (main refused it) is the act\'s refusal, and the issue stays unread', async () => {
-  const b = boot({
-    mutate: (c) => {
-      const start = c.overlay.start
-      c.overlay.start = (spec) => {
-        const h = start(spec)
-        const result = Promise.reject(new Error('overlay: bronos.jira already has 3 overlays open'))
-        result.catch(() => {})
-        return { ...h, result }
-      }
-    },
-  })
+// Round-4 review: main never throws from start(); its refusal (3 open, 10 a minute) rejects the handle's result a
+// moment later, and act answered ok for a window that never opened.
+test('act open: a window whose result rejects (main refused it) is the act\'s refusal, and the issue stays unread', async () => {
+  const b = boot({ overlayRefuse: 'overlay: bronos.jira already has 3 overlays open', project: ON })
   await b.h.pollNow('test')
   await b.h.S.classifying
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
   const r = await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
   assert.equal(r.ok, false)
-  assert.match(r.message, /^jira: Cannot open the reader: overlay: bronos\.jira already has 3 overlays open/)
+  assert.match(r.message, /^jira: Cannot open ABC-1: overlay: bronos\.jira already has 3 overlays open/)
   assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
   await b.h.stop()
 })
 
-test('act open: the loader the person closed (annotate { opened: false }) leaves the issue unread; a shown one marks it read', async () => {
-  let answer = { opened: false }
-  const calls = []
-  const reviewer = {
-    prepare: async () => ({ opened: true }),
-    cancel: async () => ({ closed: false }),
-    annotate: async (a) => (calls.push(a.key), answer),
-  }
-  const b = boot({ reviewer, project: ON })
+test('act open with markReadOnOpen: a window closed before the owner saw the issue leaves it unread; a shown one marks it read', async () => {
+  const b = boot({ project: ON })
   await b.h.pollNow('test')
   await b.h.S.classifying
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
-  // The prepared loader was up, so act answers ok; the person closed it while the issue loaded.
+  // Closed while it loaded: no owner copy ever had the issue.
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  for (let i = 0; i < 100 && !calls.length; i++) await settle()
+  b.ctx.overlays[0].close()
   await settle()
-  assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
-  answer = { opened: true }
-  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
-  assert.equal(await readOf(b, 'ABC-1'), true)
-  await b.h.stop()
-})
-
-// A failed read with no cached copy used to cancel the reviewer's loader: the overlay flashed open and
-// shut with no reason. With the reviewer's fail (cc-cockpit 0.13.2) the loader shows the error with
-// Try again; the act contract is unchanged (the loader was on screen: ok at prepare), the issue stays
-// unread, and Try again opens it in the same overlay.
-test('act open: a read that fails after prepare leaves the error page; Try again opens the issue; unread until then', async () => {
-  const order = []
-  const reviewer = {
-    features: async () => ['prepare', 'fail'],
-    prepare: async (s) => (order.push(['prepare', s.key]), { opened: true }),
-    cancel: async (s) => (order.push(['cancel', s.key]), { closed: true }),
-    fail: async (s) => (order.push(['fail', s.key, s.retry, s.message]), { failed: true }),
-    annotate: async (a) => (order.push(['annotate', a.key]), { opened: true }),
-  }
-  const jira = {}
-  const b = boot({ reviewer, jira, project: ON })
-  await b.h.pollNow('test')
-  await b.h.S.classifying
-  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
-  jira.fail = { 'ABC-1': 404 }
-  const cached = b.h.S.cache.issues['ABC-1']
-  delete b.h.S.cache.issues['ABC-1']
-  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  await until(() => order.length === 2)
-  await settle()
-  assert.deepEqual(order.map((o) => o.slice(0, 3)), [['prepare', 'jira:ABC-1'], ['fail', 'jira:ABC-1', true]])
-  assert.match(order[1][3], /^Could not load this issue: /)
-  assert.equal(await readOf(b, 'ABC-1'), false, 'an issue never shown stays unread')
-  assert.equal(b.h.S.notice.kind, 'error', 'the panel says it too, as before')
-  // Try again: only our own caller and key count.
-  const fire = (d) => b.ctx.handles.reviewer.listeners.action.forEach((fn) => fn(d))
-  fire({ key: 'jira:ABC-1', id: 'retry', caller: 'someone.else' })
-  fire({ key: 'jira:ABC-2', id: 'retry', caller: 'bronos.jira' })
-  await settle()
-  assert.equal(order.length, 2)
-  delete jira.fail
-  b.h.S.cache.issues['ABC-1'] = cached
-  fire({ key: 'jira:ABC-1', id: 'retry', caller: 'bronos.jira' })
-  await until(() => order.length === 5)
-  assert.deepEqual(order.slice(2), [['prepare', 'jira:ABC-1'], ['annotate', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
-  for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
-  assert.equal(await readOf(b, 'ABC-1'), true, 'shown now')
-  await b.h.stop()
-})
-
-test('act open: a reviewer without fail (an older app) cancels the loader on a failed read, as before', async () => {
-  const order = []
-  const reviewer = {
-    features: async () => ['prepare'],
-    prepare: async (s) => (order.push(['prepare', s.key]), { opened: true }),
-    cancel: async (s) => (order.push(['cancel', s.key]), { closed: true }),
-    annotate: async () => ({ opened: true }),
-  }
-  const jira = {}
-  const b = boot({ reviewer, jira })
-  await b.h.pollNow('test')
-  await b.h.S.classifying
-  jira.fail = { 'ABC-1': 404 }
-  delete b.h.S.cache.issues['ABC-1']
-  await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open'])
-  await until(() => order.length === 2)
-  assert.deepEqual(order, [['prepare', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
-  await b.h.stop()
-})
-
-test('our reader page closed before the issue reached it leaves the issue unread; one still open marks it read', async () => {
-  let keepOpen = false
-  const b = boot({
-    project: ON,
-    mutate: (c) => {
-      const start = c.overlay.start
-      c.overlay.start = (spec) => (keepOpen ? { ...start(spec), result: new Promise(() => {}) } : start(spec))
-    },
-  })
-  await b.h.pollNow('test')
-  await b.h.S.classifying
-  assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
-  // The fake page ends at once (dismissed): the person closed the loader during the read.
-  await b.ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.ok(b.ctx.overlays.length >= 1)
   assert.equal(await readOf(b, 'ABC-1'), false)
-  keepOpen = true
+  // A read guest's copy is not the person either.
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
+  const o = b.ctx.overlays[1]
+  o.connect(READER)
+  await until(() => kitView(o, 'c-read').phase === 'ready')
+  assert.equal(await readOf(b, 'ABC-1'), false)
+  o.connect(OWNER)
   for (let i = 0; i < 100 && !(await readOf(b, 'ABC-1')); i++) await settle()
   assert.equal(await readOf(b, 'ABC-1'), true)
   await b.h.stop()
@@ -544,17 +402,16 @@ test('our reader page closed before the issue reached it leaves the issue unread
 // Opening marks read only with markReadOnOpen (default off): Inbox's item keeps read: false, and no
 // item event after the open claims otherwise.
 test('act open with markReadOnOpen off (the default): the item stays unread and no event says read', async () => {
-  const calls = []
-  const reviewer = { annotate: async (a) => (calls.push(a.key), { opened: true }) }
-  const b = boot({ reviewer })
+  const b = boot()
   await b.h.pollNow('test')
   await b.h.S.classifying
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'markUnread']), { ok: true })
   const n = events(b).length
   assert.deepEqual(await b.ctx.callService('inbox-feed', 'act', ['ABC-1', 'open']), { ok: true })
-  for (let i = 0; i < 100 && !calls.length; i++) await settle()
+  const o = b.ctx.overlays[0]
+  o.connect(OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
   await settle()
-  assert.deepEqual(calls, ['jira:ABC-1'], 'the issue was shown')
   assert.equal(await readOf(b, 'ABC-1'), false)
   assert.ok(!events(b).slice(n).some((e) => e.event === 'item' && e.data.id === 'ABC-1' && e.data.read), 'no item event claims read')
   // The explicit action still works.
@@ -732,7 +589,7 @@ test('an emit that throws never breaks a poll', async () => {
 test('the jira service is unchanged beside it', async () => {
   const { ctx, h } = boot()
   assert.deepEqual(Object.keys(ctx.provided).sort(), ['inbox-feed', 'jira'])
-  assert.deepEqual(Object.keys(ctx.provided.jira).sort(), ['document', 'issue', 'site'])
+  assert.deepEqual(Object.keys(ctx.provided.jira).sort(), ['document', 'issue', 'openIssue', 'site'])
   assert.equal((await ctx.callService('jira', 'site')).site, 'https://acme.atlassian.net')
   await assert.rejects(ctx.callService('jira', 'issue', ['nope']), /jira: not an issue key/)
   await h.stop()
@@ -750,10 +607,10 @@ test('an older app (services without useAll or emit) still activates, provides a
   await h.stop()
 })
 
-test('the manifest provides jira 1 and inbox-feed 2 at 0.8.0', () => {
+test('the manifest provides jira 2 and inbox-feed 2 at 0.9.0', () => {
   const m = require('../plugin.json')
-  assert.equal(m.version, '0.8.0')
-  assert.deepEqual(m.services.provides, { jira: 1, 'inbox-feed': 2 })
+  assert.equal(m.version, '0.9.0')
+  assert.deepEqual(m.services.provides, { jira: 2, 'inbox-feed': 2 })
 })
 
 async function until(fn, ms = 2000) {

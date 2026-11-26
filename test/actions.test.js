@@ -1,7 +1,8 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { pickTab, openerArgv, isMissingAnnotate } = require('../dist/lib/actions')
+const actions = require('../dist/lib/actions')
+const { pickTab, openerArgv } = actions
 
 const tab = (tabId, status, extra = {}) => ({ tabId, status, cwd: '/p/proj', notes: [], files: [], ...extra })
 
@@ -33,8 +34,6 @@ test('the browser opener: one argv entry for the URL, https only, none on Window
   assert.equal(openerArgv('linux', 'file:///etc/passwd'), null)
 })
 
-test('a reviewer without annotate is told apart from a real failure', () => {
-  assert.equal(isMissingAnnotate(new Error('service "reviewer" (plugin cockpit.reviewer) has no method "annotate"')), true)
-  assert.equal(isMissingAnnotate(new Error('annotate: text too long')), false)
-  assert.equal(isMissingAnnotate(undefined), false)
+test('0.9.0: no reviewer fallback is left (the issue opens in its own window)', () => {
+  assert.equal(actions.isMissingAnnotate, undefined)
 })

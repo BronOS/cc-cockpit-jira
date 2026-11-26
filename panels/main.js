@@ -143,7 +143,7 @@ function renderRow(r) {
     class: `row${r.unread ? ' unread' : ''}`,
     tabindex: '0',
     'aria-label': `${r.key}: ${r.summary}${r.unread ? ' (unread)' : ''}. Enter opens it.`,
-    title: `${r.summary}\nClick to open${state.annotate ? ' (notes, Discuss, New session)' : ''}`,
+    title: `${r.summary}\nClick to open (notes, Ask, Discuss)`,
   })
   li.dataset.key = r.key
   li.addEventListener('click', (ev) => {

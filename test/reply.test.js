@@ -1,59 +1,15 @@
 'use strict'
-// Writing to Jira end to end (0.8.0): the reply page, the Reply buttons and `ccc jira update`, with a
-// fake ctx, a fake Jira and a fake reply page that answers the host as panels/reply.js does.
+// Writing to Jira end to end (0.8.0; 0.9.0: the Reply tab of the issue window): the form the host keeps per issue,
+// Post, and `ccc jira update`, with a fake ctx (perView copies), a fake Jira and the pages' messages.
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 const host = require('../dist/host')
-const { fakeJira, fakeCtx, fakeTriage, fixture, NOW, CONFIGURED, TRANSITIONS } = require('./fakes')
+const wr = require('../dist/lib/write')
+const { replyFields } = require('../panels/replylogic')
+const { fakeJira, fakeCtx, fakeTriage, fixture, kitView, until, NOW, CONFIGURED, TRANSITIONS, OWNER, WRITER, READER } = require('./fakes')
 const { parseTime } = require('../dist/lib/util')
-
-const OWNER = { view: 'desktop', access: 'owner' }
-const READ = { view: 'web:2', access: 'read', person: 'Ann' }
-const WRITE = { view: 'web:3', access: 'write', person: 'Bob' }
-
-/** The reply page as panels/reply.js behaves: takes a fill unless the person typed, answers collect. */
-function fakePage() {
-  const states = new Map()
-  const page = (o, m) => {
-    if (o.spec.file !== 'panels/reply.html') return
-    const st = states.get(o) || { comment: '', transitionId: '', dirty: false, drawn: false, msgs: [] }
-    states.set(o, st)
-    st.msgs.push(m)
-    if (m.type === 'issue') {
-      const f = m.fill
-      const apply = Boolean(f) && !(st.drawn && st.dirty)
-      if (apply) Object.assign(st, { comment: f.comment, transitionId: f.transitionId, dirty: false, marker: f.marker, asked: f.asked, rev: f.n })
-      // `page.hold`: the page drew the fill but its ack is still on the way (released by page.release()).
-      const ack = () => f && o.send({ type: 'filled', n: f.n, applied: apply })
-      if (page.hold) page.held.push(ack)
-      else ack()
-      st.drawn = true
-    } else if (m.type === 'collect' && page.onCollect) {
-      // A test answers the collect itself (later, or with other values).
-      page.onCollect(o, m, st)
-    } else if (m.type === 'collect') {
-      o.send({ type: 'values', n: m.n, comment: st.comment, transitionId: st.transitionId, rev: st.rev })
-    } else if (m.type === 'result' && m.clearComment) {
-      st.comment = ''
-    }
-  }
-  page.state = (o) => states.get(o)
-  page.hold = false
-  page.held = []
-  page.release = () => {
-    page.hold = false
-    for (const a of page.held.splice(0)) a()
-  }
-  /** The person types (and maybe picks a move). */
-  page.edit = (o, comment, transitionId) => {
-    const st = states.get(o)
-    st.comment = comment
-    if (transitionId !== undefined) st.transitionId = transitionId
-    st.dirty = true
-    o.send({ type: 'edit', comment: st.comment, transitionId: st.transitionId })
-  }
-  return page
-}
 
 const UPDATED = '2026-11-02T11:30:00.000+0000'
 
@@ -68,56 +24,52 @@ function boot(opts = {}) {
     jiraOpts.issues = { ...(jiraOpts.issues || {}), 'ABC-1': raw }
   }
   const jira = fakeJira(jiraOpts)
-  const page = fakePage()
-  const ctx = fakeCtx({ project: { ...CONFIGURED, ...(opts.project || {}) }, triage: fakeTriage(), sessions: opts.sessions, overlayWait: true, buttons: true, noToolbar: opts.noToolbar, page })
-  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, draftWaitMs: opts.draftWaitMs })
-  return { jira, ctx, h, page, jiraOpts }
+  const ctx = fakeCtx({ project: { ...CONFIGURED, ...(opts.project || {}) }, triage: fakeTriage(), sessions: opts.sessions, buttons: true })
+  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, draftWaitMs: opts.draftWaitMs, overlaySettleMs: 10 })
+  return { jira, ctx, h, jiraOpts }
 }
 
-const replyPages = (ctx) => ctx.overlays.filter((o) => o.spec.file === 'panels/reply.html')
-const lastOf = (o, type) => [...o.posts].reverse().find((m) => m.type === type)
+const windowsOf = (ctx) => ctx.overlays.filter((o) => o.spec.file === 'panels/issue.html')
+const lastOwn = (o, copy, type) => [...kitView(o, copy).own].reverse().find((m) => m.type === type)
+const replyOf = (o, copy = 'c-owner') => lastOwn(o, copy, 'reply')
+const noteOf = (o, copy = 'c-owner') => lastOwn(o, copy, 'replyNote')
+const edit = (o, from, comment, transitionId = '') => o.send({ type: 'edit', comment, transitionId }, from)
+const post = (o, from, comment, transitionId = '') => o.send({ type: 'post', comment, transitionId }, from)
 
-async function until(fn, ms = 3000) {
-  const end = Date.now() + ms
-  while (!fn()) {
-    if (Date.now() > end) throw new Error('timed out waiting')
-    await new Promise((r) => setTimeout(r, 5))
-  }
+/** Reply from the panel (by `from`), the window's copies connected; waits for the owner's form. */
+async function openReply(ctx, ...copies) {
+  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
+  const o = windowsOf(ctx).at(-1)
+  for (const c of copies.length ? copies : [OWNER]) o.connect(c)
+  await until(() => replyOf(o, (copies[0] || OWNER).copy) && replyOf(o, (copies[0] || OWNER).copy).loaded)
+  return o
 }
 
-test('Reply from the panel: the page shows the issue and its moves, writes nothing until the click', async () => {
-  const { ctx, h, jira, page } = boot()
+test('Reply from the panel: the window opens on Reply with the moves; nothing is written until Post', async () => {
+  const { ctx, h, jira } = boot()
   await h.pollNow('test')
   assert.equal(ctx.lastState().writes, true)
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  const [o] = replyPages(ctx)
-  assert.ok(o, 'the reply page opened')
-  assert.equal(o.spec.ready, 'manual')
-  assert.equal(o.spec.discuss, false)
-  assert.equal(o.spec.type, undefined, 'no issue type: no item buttons on the reply page')
-  await until(() => lastOf(o, 'issue'))
-  const issue = lastOf(o, 'issue')
-  assert.equal(issue.key, 'ABC-1')
-  assert.equal(issue.status, 'In Progress')
-  assert.equal(issue.tone, 'info')
-  assert.deepEqual(issue.transitions.map((t) => [t.id, t.enabled]), [['21', true], ['31', true], ['41', false]])
-  assert.equal(issue.toolbar, true)
-  await until(() => o.buttons.length && o.buttons[0].label === 'Post comment')
-  assert.equal(o.buttons[0].disabled, true, 'nothing to post yet')
-  // The person types and picks a move: the label follows.
-  page.edit(o, 'Fixed in 1.2', '31')
-  assert.deepEqual(o.buttons.map((b) => [b.label, b.disabled]), [['Post and move', false]])
-  page.edit(o, '', '31')
-  assert.equal(o.buttons[0].label, 'Move')
-  page.edit(o, 'Fixed in 1.2', '31')
+  const o = await openReply(ctx)
+  assert.deepEqual(lastOwn(o, 'c-owner', 'select'), { type: 'select', tab: 'reply' })
+  const r = replyOf(o)
+  assert.equal(r.status, 'In Progress')
+  assert.equal(r.tone, 'info')
+  assert.deepEqual(r.transitions.map((t) => [t.id, t.enabled]), [['21', true], ['31', true], ['41', false]])
+  assert.equal(r.max, 32000)
+  assert.equal(r.comment, '')
+  edit(o, OWNER, 'Fixed in 1.2', '31')
   assert.equal(jira.writes.length, 0, 'nothing written before the click')
-  // A second Reply focuses the same page.
+  // A second Reply focuses the same window.
   await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  assert.equal(replyPages(ctx).length, 1, 'one page per issue')
-  await o.click('send', OWNER)
+  assert.equal(windowsOf(ctx).length, 1, 'one window per issue')
+  assert.ok(o.focused >= 1)
+  post(o, OWNER, 'Fixed in 1.2', '31')
+  await until(() => jira.writes.length === 2)
   assert.deepEqual(jira.writes.map((w) => w.what), ['comment', 'transitions'], 'comment first, then the move')
   assert.deepEqual(jira.writes[1].body, { transition: { id: '31' } })
-  assert.equal(o.closed, true, 'a full success closes the page')
+  await until(() => replyOf(o).note && /moved to Done/.test(replyOf(o).note.text))
+  assert.equal(o.closed, false, 'the window stays, showing the issue as it is now')
+  assert.equal(replyOf(o).comment, '', 'the form starts over')
   assert.match(ctx.lastState().notice.text, /ABC-1: comment posted\. ABC-1: moved to Done\./)
   // The person's own change is not unread: the seen mark moved to the new `updated`; the feed heard it.
   assert.ok(h.S.seen.marks['ABC-1'] >= parseTime(UPDATED))
@@ -126,99 +78,237 @@ test('Reply from the panel: the page shows the issue and its moves, writes nothi
   await h.stop()
 })
 
-test('a read-only guest gets no page and writes nothing; a write guest may', async () => {
-  const { ctx, h, jira, page } = boot()
+test("a read guest's Post is refused by from.access. Fail closed: a missing from refuses", async () => {
+  const { ctx, h, jira } = boot()
   await h.pollNow('test')
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, READ)
-  assert.equal(replyPages(ctx).length, 0)
+  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, READER)
+  assert.equal(windowsOf(ctx).length, 0)
   assert.match(ctx.lastState().notice.text, /Only the owner or a guest with write access/)
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, WRITE)
-  const [o] = replyPages(ctx)
-  await until(() => lastOf(o, 'issue'))
-  page.edit(o, 'hello')
-  // A click whose `from` is a read view writes nothing, whatever the page holds.
-  await o.click('send', READ)
+  const o = await openReply(ctx, OWNER, WRITER, READER)
+  edit(o, OWNER, 'hello')
+  // A Post whose `from` is a read view writes nothing, whatever its page holds.
+  post(o, READER, 'hello')
+  await until(() => noteOf(o, 'c-read'))
+  assert.match(noteOf(o, 'c-read').text, /Only the owner or a guest with write access/)
+  // No `from` at all (an app that does not say who): nothing, and no owner default anywhere.
+  post(o, undefined, 'hello')
+  post(o, { view: 'desktop', copy: 'c-owner' }, 'hello') // no access
+  await new Promise((r) => setTimeout(r, 20))
   assert.equal(jira.writes.length, 0)
-  assert.match(lastOf(o, 'error').message, /Only the owner or a guest with write access/)
-  await o.click('send', WRITE)
+  assert.equal(wr.mayWrite(undefined), false)
+  assert.equal(wr.mayWrite(null), false)
+  assert.equal(wr.mayWrite({ view: 'desktop' }), false)
+  // A write guest may (it uses the owner's Jira token, as 0.8.0 did).
+  post(o, WRITER, 'hello')
+  await until(() => jira.writes.length === 1)
   assert.deepEqual(jira.writes.map((w) => w.what), ['comment'])
   await h.stop()
 })
 
-test('the overlay toolbar: Reply on our issue overlays, checked on the click; gone with writes off', async () => {
+test("a read guest's copy gets no Reply tab and no draft", async () => {
+  const { ctx, h } = boot({ sessions: [{ tabId: 't1', status: 'working', cwd: '/p', notes: [], files: [], name: 'Checkout fix' }] })
+  await h.pollNow('test')
+  const r = await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'Draft text', tabId: 't1' })
+  assert.equal(r.code, 0, r.stderr)
+  const o = windowsOf(ctx)[0]
+  o.connect(READER)
+  o.connect(OWNER)
+  await until(() => kitView(o, 'c-read').phase === 'ready' && replyOf(o) && replyOf(o).comment === 'Draft text')
+  assert.equal(kitView(o, 'c-read').state.reply, false)
+  assert.equal(kitView(o, 'c-owner').state.reply, true)
+  const own = kitView(o, 'c-read').own
+  assert.deepEqual(own.filter((m) => m.type === 'reply' || m.type === 'select'), [], 'no form, no draft, no Reply selected')
+  assert.ok(!JSON.stringify(o.sent('c-read')).includes('Draft text'))
+  // Its edits are dropped too.
+  edit(o, READER, 'guest words')
+  await new Promise((r2) => setTimeout(r2, 10))
+  assert.equal(replyOf(o).comment, 'Draft text')
+  await h.stop()
+})
+
+test('Reply draft survives Esc', async () => {
+  const { ctx, h, jira } = boot({ sessions: [{ tabId: 't1', status: 'working', cwd: '/p', notes: [], files: [], name: 'Checkout fix' }] })
+  await h.pollNow('test')
+  assert.equal((await ctx.runCli(['update', 'ABC-1', '--status', 'in progress', '-'], { stdin: 'Looking at it now.', tabId: 't1' })).code, 0)
+  const o = windowsOf(ctx)[0]
+  o.close() // Esc
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  const o2 = windowsOf(ctx)[1]
+  assert.ok(o2 && o2 !== o, 'a new window')
+  o2.connect(OWNER)
+  await until(() => replyOf(o2))
+  assert.equal(replyOf(o2).comment, 'Looking at it now.')
+  assert.equal(replyOf(o2).transitionId, '21')
+  assert.equal(replyOf(o2).marker, 'Draft from Claude (Checkout fix)')
+  // The person's own words survive Esc too, and stay theirs: a draft from ccc is then refused.
+  edit(o2, OWNER, 'my own words')
+  o2.close()
+  const r = await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'another' })
+  assert.equal(r.code, 1)
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  const o3 = windowsOf(ctx)[2]
+  o3.connect(OWNER)
+  await until(() => replyOf(o3))
+  assert.equal(replyOf(o3).comment, 'my own words')
+  assert.equal(jira.writes.length, 0)
+  await h.stop()
+})
+
+test('two views see one draft', async () => {
+  const { ctx, h, jira } = boot()
+  await h.pollNow('test')
+  const o = await openReply(ctx, OWNER, WRITER)
+  await until(() => replyOf(o, 'c-write') && replyOf(o, 'c-write').loaded)
+  // A draft reaches both.
+  assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'from Claude' })).code, 0)
+  await until(() => replyOf(o, 'c-owner').comment === 'from Claude' && replyOf(o, 'c-write').comment === 'from Claude')
+  // The write guest types: the owner's copy follows; the typing copy keeps its own fields (own).
+  edit(o, WRITER, 'guest edit', '31')
+  assert.deepEqual([replyOf(o, 'c-owner').comment, replyOf(o, 'c-owner').transitionId, replyOf(o, 'c-owner').edited], ['guest edit', '31', true])
+  assert.equal(replyOf(o, 'c-write').own, true)
+  assert.equal(replyOf(o, 'c-write').comment, undefined)
+  // Last write wins: the owner types over it.
+  edit(o, OWNER, 'owner edit', '')
+  assert.equal(replyOf(o, 'c-write').comment, 'owner edit')
+  // A Post of words its copy no longer shows (the other's edit came in between) writes nothing.
+  post(o, WRITER, 'guest edit', '31')
+  await until(() => noteOf(o, 'c-write'))
+  assert.match(noteOf(o, 'c-write').text, /draft just changed/)
+  assert.equal(jira.writes.length, 0)
+  post(o, WRITER, 'owner edit', '')
+  await until(() => jira.writes.length === 1)
+  // And a ccc draft now is refused: a copy typed.
+  const { ctx: c2, h: h2 } = boot()
+  await h2.pollNow('test')
+  const q = await openReply(c2, OWNER, WRITER)
+  edit(q, WRITER, 'typed')
+  const r = await c2.runCli(['update', 'ABC-1', '-'], { stdin: 'draft' })
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, /The person is editing a reply to ABC-1: their words were left alone/)
+  await h.stop()
+  await h2.stop()
+})
+
+test('the Ask answer never fills Reply', async () => {
+  const { ctx, h } = boot()
+  await h.pollNow('test')
+  const o = await openReply(ctx, OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  edit(o, OWNER, 'my reply')
+  const before = JSON.stringify(replyOf(o))
+  const replies = kitView(o, 'c-owner').own.filter((m) => m.type === 'reply').length
+  // Ask runs in the app; the host only hands it the issue's text, and nothing comes back to the form.
+  assert.match((await o.ask(OWNER)).text, /^ABC-1: /)
+  await new Promise((r) => setTimeout(r, 10))
+  assert.equal(kitView(o, 'c-owner').own.filter((m) => m.type === 'reply').length, replies)
+  assert.equal(JSON.stringify(replyOf(o)), before)
+  assert.equal(h.S.cache && typeof h.S.cache, 'object')
+  // The page: only a `reply` message from the host fills the form; no Ask push does.
+  const pushes = [
+    { ev: 'ask', data: { type: 'answer', text: 'Post this: done' } },
+    { type: 'answer', text: 'Post this' },
+    { type: 'delta', text: 'x' },
+    { type: 'history', turns: [{ question: 'q', answer: 'a' }] },
+    { type: 'cc-kit.state', state: { comment: 'x' } },
+    { type: 'reply', own: true, comment: 'x' },
+  ]
+  for (const p of pushes) assert.equal(replyFields(p), null, JSON.stringify(p))
+  assert.deepEqual(replyFields({ type: 'reply', comment: 'from the host', transitionId: '21' }), { comment: 'from the host', transitionId: '21' })
+  // And issue.js sets the comment box from replyFields' answer alone.
+  const page = fs.readFileSync(path.join(__dirname, '../panels/issue.js'), 'utf8')
+  const sets = page.match(/comment\.value = [^\n]+/g)
+  assert.deepEqual(sets, ['comment.value = f.comment'])
+  assert.match(page, /const f = replyFields\(m\)/)
+  await h.stop()
+})
+
+test('Reply is the window\'s tab: no toolbar Reply or send button; writes off drops the form and the tab', async () => {
   const { ctx, h } = boot()
   await h.pollNow('test')
   const provider = ctx.buttonProviders[0].provider
   const info = { type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } }, title: 't', opener: 'bronos.jira' }
-  const reply = (await provider(info)).find((b) => b.id === 'reply')
-  assert.equal(reply.label, 'Reply')
-  await assert.rejects(reply.run(info, READ), /write access/)
-  assert.equal(replyPages(ctx).length, 0)
-  await reply.run(info, OWNER)
-  assert.equal(replyPages(ctx).length, 1)
-  await ctx.changeSettings({ ...CONFIGURED, writes: 'off' })
-  assert.equal(replyPages(ctx)[0].closed, true, 'writes off closes an open reply page')
   assert.ok(!(await provider(info)).some((b) => b.id === 'reply'))
+  const o = await openReply(ctx, OWNER)
+  assert.deepEqual(o.buttons.map((b) => b.id), ['browser'], 'no send button: Post is in the tab')
+  edit(o, OWNER, 'unsent')
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  await ctx.changeSettings({ ...CONFIGURED, writes: 'off' })
+  assert.equal(o.closed, false, 'the window stays')
+  assert.equal(kitView(o, 'c-owner').state.reply, false, 'its copies lose the Reply tab')
   assert.equal(ctx.lastState().writes, false)
   await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
   assert.match(ctx.lastState().notice.text, /writing is off/)
+  await ctx.changeSettings({ ...CONFIGURED, writes: 'draft' })
+  o.send({ type: 'replyOpen' }, OWNER)
+  await until(() => replyOf(o).comment === '' && replyOf(o).loaded)
   await h.stop()
 })
 
-test('ccc jira update, draft: opens the page filled in, answers at once, writes nothing', async () => {
-  const { ctx, h, jira, page } = boot({ sessions: [{ tabId: 't1', status: 'working', cwd: '/p', notes: [], files: [], name: 'Checkout fix' }] })
+test('ccc jira update, draft: opens the window on Reply filled in, answers at once, writes nothing', async () => {
+  const { ctx, h, jira } = boot({ sessions: [{ tabId: 't1', status: 'working', cwd: '/p', notes: [], files: [], name: 'Checkout fix' }] })
   await h.pollNow('test')
   const r = await ctx.runCli(['update', 'abc-1', '--status', 'in progress', '-'], { stdin: 'Looking at it now.', tabId: 't1' })
   assert.equal(r.code, 0, r.stderr)
   assert.match(r.stdout, /Draft opened for ABC-1: the person posts it\./)
-  assert.match(r.stdout, /Do not run this again/)
-  const [o] = replyPages(ctx)
-  const st = page.state(o)
-  assert.equal(st.comment, 'Looking at it now.')
-  assert.equal(st.transitionId, '21', 'by the target status, any case')
-  assert.equal(st.marker, 'Draft from Claude (Checkout fix)')
+  assert.match(r.stdout, /decides in the Reply tab\. Do not run this again/)
+  const [o] = windowsOf(ctx)
+  o.connect(OWNER)
+  await until(() => replyOf(o))
+  assert.deepEqual(lastOwn(o, 'c-owner', 'select'), { type: 'select', tab: 'reply' }, 'a draft opens Reply (D7)')
+  const f = replyOf(o)
+  assert.equal(f.comment, 'Looking at it now.')
+  assert.equal(f.transitionId, '21', 'by the target status, any case')
+  assert.equal(f.marker, 'Draft from Claude (Checkout fix)')
+  assert.equal(f.edited, false)
   assert.equal(jira.writes.length, 0)
-  // From a shell (no tabId): "Draft from ccc"; an unknown status opens with Keep status and says so.
-  o.close()
+  // From a shell (no tabId): "Draft from ccc"; an unknown status keeps the status and says so.
   const r2 = await ctx.runCli(['update', 'ABC-1', '--status', 'Closed', '-'], { stdin: 'x' })
   assert.equal(r2.code, 0)
   assert.match(r2.stdout, /left at Keep status: no transition or status "Closed".*Possible: Start progress \(to In Progress\), Done/)
-  const o2 = replyPages(ctx)[1]
-  assert.equal(page.state(o2).marker, 'Draft from ccc')
-  assert.equal(page.state(o2).transitionId, '')
-  assert.match(page.state(o2).asked, /Asked to move: no transition or status "Closed"/)
+  await until(() => replyOf(o).marker === 'Draft from ccc')
+  assert.equal(replyOf(o).transitionId, '')
+  assert.match(replyOf(o).asked, /Asked to move: no transition or status "Closed"/)
   // A disabled one too.
-  o2.close()
   const r3 = await ctx.runCli(['update', 'ABC-1', '--status', 'Resolve'])
   assert.equal(r3.code, 0)
   assert.match(r3.stdout, /not possible from here.*needs fields: open in Jira/)
   assert.equal(jira.writes.length, 0)
+  assert.equal(windowsOf(ctx).length, 1, 'the same window')
   await h.stop()
 })
 
-test('a new draft replaces an untouched page, and is refused while the person edits theirs', async () => {
-  const { ctx, h, page } = boot()
+test('a new draft replaces an untouched form, and is refused once a copy typed, also during its read', async () => {
+  const { ctx, h } = boot()
   await h.pollNow('test')
   assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })).code, 0)
-  const [o] = replyPages(ctx)
+  const [o] = windowsOf(ctx)
+  o.connect(OWNER)
   assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'second' })).code, 0)
-  assert.equal(replyPages(ctx).length, 1, 'the same page')
-  assert.equal(page.state(o).comment, 'second')
-  page.edit(o, 'my own words')
+  await until(() => replyOf(o) && replyOf(o).comment === 'second')
+  edit(o, OWNER, 'my own words')
   const r = await ctx.runCli(['update', 'ABC-1', '--status', 'Done', '-'], { stdin: 'third' })
   assert.equal(r.code, 1)
-  assert.match(r.stderr, /The person is editing a reply to ABC-1: their page was left alone/)
-  assert.equal(page.state(o).comment, 'my own words')
-  // The race: the person types after the host decided to replace; the page keeps their words.
-  const { ctx: c2, h: h2, page: p2 } = boot()
+  assert.match(r.stderr, /The person is editing a reply to ABC-1: their words were left alone/)
+  // (The typing copy's own answers carry no fields: another copy shows what the form holds.)
+  o.connect({ ...OWNER, copy: 'c-owner-2' })
+  await until(() => replyOf(o, 'c-owner-2'))
+  assert.equal(replyOf(o, 'c-owner-2').comment, 'my own words')
+  // The race: the person types while the draft's issue read is under way; their words stay.
+  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
+  const { ctx: c2, h: h2 } = boot({ jira: { routes: g.route } })
   await h2.pollNow('test')
-  await c2.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })
-  const [q] = replyPages(c2)
-  p2.state(q).dirty = true // typed, its edit message still on the way
-  p2.state(q).comment = 'typing…'
-  const r2 = await c2.runCli(['update', 'ABC-1', '-'], { stdin: 'second' })
+  assert.equal((await c2.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })).code, 0)
+  const [q] = windowsOf(c2)
+  q.connect(OWNER)
+  g.armed = true
+  const cli = c2.runCli(['update', 'ABC-1', '-'], { stdin: 'second' })
+  await until(() => g.hit > 0)
+  edit(q, OWNER, 'typing…')
+  g.armed = false
+  g.open()
+  const r2 = await cli
   assert.equal(r2.code, 1)
-  assert.equal(p2.state(q).comment, 'typing…')
+  assert.equal(replyOf(q).comment, 'typing…')
   await h.stop()
   await h2.stop()
 })
@@ -234,7 +324,7 @@ test('ccc jira update, direct: comment then move, each step reported; an unknown
   assert.equal(r.code, 0, r.stderr)
   assert.equal(r.stdout, 'ABC-1: comment posted\nABC-1: moved to Done\n')
   assert.deepEqual(jira.writes.map((w) => w.what), ['comment', 'transitions'])
-  assert.equal(replyPages(ctx).length, 0, 'direct opens no page')
+  assert.equal(windowsOf(ctx).length, 0, 'direct opens no page')
   assert.ok(h.S.seen.marks['ABC-1'] >= parseTime(UPDATED))
   await h.stop()
 })
@@ -257,73 +347,67 @@ test('off: ccc jira update is refused and nothing is read or written', async () 
   assert.equal(r.code, 1)
   assert.match(r.stderr, /writing is off for this project/)
   assert.equal(jira.calls.length, before)
-  assert.equal(replyPages(ctx).length, 0)
+  assert.equal(windowsOf(ctx).length, 0)
   await h.stop()
 })
 
-test('the page: a move that is gone at the click writes nothing, the comment neither, and the list refreshes', async () => {
+
+test('Post: a move that is gone at the click writes nothing, the comment neither, and the list refreshes', async () => {
   let list = TRANSITIONS
-  const { ctx, h, jira, page } = boot({ jira: { transitions: () => list } })
+  const { ctx, h, jira } = boot({ jira: { transitions: () => list } })
   await h.pollNow('test')
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  const [o] = replyPages(ctx)
-  await until(() => lastOf(o, 'issue'))
-  page.edit(o, 'Moving it on', '21')
+  const o = await openReply(ctx)
+  edit(o, OWNER, 'Moving it on', '21')
   list = { transitions: [TRANSITIONS.transitions[1]] } // someone moved it meanwhile
-  await o.click('send', OWNER)
+  post(o, OWNER, 'Moving it on', '21')
+  await until(() => replyOf(o).note && replyOf(o).note.kind === 'error' && !replyOf(o).busy)
   assert.equal(jira.writes.length, 0)
-  const t = lastOf(o, 'transitions')
-  assert.deepEqual(t.transitions.map((x) => x.id), ['31'])
-  assert.equal(t.keep, '')
-  assert.match(t.message, /changed meanwhile.*nothing was written/)
-  assert.equal(o.closed, undefined, 'the page stays for the person to choose again')
+  const f = replyOf(o)
+  assert.deepEqual(f.transitions.map((x) => x.id), ['31'])
+  assert.equal(f.transitionId, '')
+  assert.match(f.note.text, /changed meanwhile.*nothing was written/i)
   await h.stop()
 })
 
-test('the page: a refused move after a posted comment keeps the page, clears the box, keeps the choice', async () => {
-  const { ctx, h, jira, page } = boot({ jira: { failTransition: 400 } })
+test('Post: a refused move after a posted comment keeps the form, clears the box, keeps the choice', async () => {
+  const { ctx, h, jira } = boot({ jira: { failTransition: 400 } })
   await h.pollNow('test')
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  const [o] = replyPages(ctx)
-  await until(() => lastOf(o, 'issue'))
-  page.edit(o, 'Done here', '31')
-  await o.click('send', OWNER)
+  const o = await openReply(ctx)
+  edit(o, OWNER, 'Done here', '31')
+  post(o, OWNER, 'Done here', '31')
+  await until(() => replyOf(o).note && replyOf(o).note.steps && !replyOf(o).busy)
   assert.deepEqual(jira.writes.map((w) => w.what), ['comment'])
-  const r = lastOf(o, 'result')
-  assert.deepEqual(r.steps.map((s) => [s.step, s.ok]), [['comment', true], ['transition', false]])
-  assert.equal(r.clearComment, true)
-  assert.equal(r.keep, '31')
-  assert.equal(o.closed, undefined)
-  assert.equal(page.state(o).comment, '')
-  assert.equal(o.buttons[0].label, 'Move', 'the retry is the move alone')
+  const f = replyOf(o)
+  assert.deepEqual(f.note.steps.map((s) => [s.step, s.ok]), [['comment', true], ['transition', false]])
+  assert.equal(f.comment, '', 'the posted comment left the box')
+  assert.equal(f.transitionId, '31', 'the move stays for a retry')
   // Nothing is posted twice: the retry moves only.
-  await o.click('send', OWNER)
+  post(o, OWNER, '', '31')
+  await until(() => jira.writes.length >= 1 && !replyOf(o).busy && replyOf(o).note && replyOf(o).note.steps && replyOf(o).note.steps.length === 1)
   assert.deepEqual(jira.writes.map((w) => w.what), ['comment'])
   await h.stop()
 })
 
-test('an app without overlay toolbar buttons: the page posts submit from its own button', async () => {
-  const { ctx, h, jira } = boot({ noToolbar: true })
+test('Post checks its values as input: over the limit, a move not listed, nothing at all', async () => {
+  const { ctx, h, jira } = boot()
   await h.pollNow('test')
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  const [o] = replyPages(ctx)
-  await until(() => lastOf(o, 'issue'))
-  assert.equal(lastOf(o, 'issue').toolbar, false)
-  o.send({ type: 'submit', comment: 'x'.repeat(32001), transitionId: '', rev: 1 }, OWNER)
-  await until(() => lastOf(o, 'error'))
-  assert.match(lastOf(o, 'error').message, /at most 32,000/)
-  o.send({ type: 'submit', comment: 'hi', transitionId: '41', rev: 1 }, OWNER)
-  await until(() => /not in the list/.test(lastOf(o, 'error').message))
-  o.send({ type: 'submit', comment: 'hi', transitionId: '', rev: 1 }, READ)
-  await until(() => /write access/.test(lastOf(o, 'error').message))
+  const o = await openReply(ctx)
+  const long = 'x'.repeat(32001)
+  edit(o, OWNER, long)
+  post(o, OWNER, long)
+  await until(() => noteOf(o))
+  assert.match(noteOf(o).text, /at most 32,000/)
+  edit(o, OWNER, 'hi', '41')
+  post(o, OWNER, 'hi', '41')
+  await until(() => /not in the list/.test(noteOf(o).text))
+  edit(o, OWNER, '  ', '')
+  post(o, OWNER, '  ', '')
+  await until(() => /Nothing to post/.test(noteOf(o).text))
   assert.equal(jira.writes.length, 0)
-  o.send({ type: 'submit', comment: 'hi', transitionId: '', rev: 1 }, OWNER)
-  await until(() => o.closed)
-  assert.deepEqual(jira.writes.map((w) => w.what), ['comment'])
   await h.stop()
 })
 
-// ---- review round 1 (codex sol/high) ----
+// ---- review round 1 (codex sol/high), as 0.9.0 has them ----
 
 /** A gate: requests matching `match` wait until open() (the test changes things meanwhile). */
 function gate(match) {
@@ -341,31 +425,20 @@ function gate(match) {
   return g
 }
 
-test('R1-1: a click while a new draft is arriving posts nothing; a stale revision is refused', async () => {
-  const { ctx, h, jira, page } = boot()
+test('R1-1: a Post made on a draft the copy had not seen posts nothing', async () => {
+  const { ctx, h, jira } = boot()
   await h.pollNow('test')
   assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'draft A' })).code, 0)
-  const [o] = replyPages(ctx)
-  // Draft B reaches the page (drawn) while its ack is still on the way; the person clicks, having read A.
-  page.hold = true
-  const cli = ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'draft B, never reviewed' })
-  await until(() => page.state(o).comment === 'draft B, never reviewed')
-  await o.click('send', OWNER)
-  assert.equal(jira.writes.length, 0, 'B is not posted on a click made on A')
-  assert.match(lastOf(o, 'error').message, /draft just changed/)
-  page.release()
-  assert.equal((await cli).code, 0)
-  // The page's own button with a revision that is not the one the host last saw drawn: refused.
-  const { ctx: c2, h: h2, jira: j2 } = boot({ noToolbar: true })
-  await h2.pollNow('test')
-  await c2.runCli(['update', 'ABC-1', '-'], { stdin: 'A' })
-  const [q] = replyPages(c2)
-  q.send({ type: 'submit', comment: 'A', transitionId: '', rev: 0 }, OWNER)
-  await until(() => lastOf(q, 'error'))
-  assert.match(lastOf(q, 'error').message, /draft just changed/)
-  assert.equal(j2.writes.length, 0)
+  const [o] = windowsOf(ctx)
+  o.connect(OWNER)
+  await until(() => replyOf(o) && replyOf(o).comment === 'draft A')
+  // Draft B reaches the host while the person, having read A, clicks Post.
+  assert.equal((await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'draft B, never reviewed' })).code, 0)
+  post(o, OWNER, 'draft A')
+  await until(() => noteOf(o))
+  assert.match(noteOf(o).text, /draft just changed/)
+  assert.equal(jira.writes.length, 0, 'neither A nor B is posted on a click made on A')
   await h.stop()
-  await h2.stop()
 })
 
 test('R1-2: writes switched off (or the token changed) during the reads: ccc direct posts nothing', async () => {
@@ -386,21 +459,21 @@ test('R1-2: writes switched off (or the token changed) during the reads: ccc dir
   }
 })
 
-test('R1-2: the reply page: writes switched off during the click\'s reads posts nothing', async () => {
+test("R1-2: the window's Post: writes switched off during the click's reads posts nothing", async () => {
   const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
-  const { ctx, h, jira, page } = boot({ jira: { routes: g.route } })
+  const { ctx, h, jira } = boot({ jira: { routes: g.route } })
   await h.pollNow('test')
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  const [o] = replyPages(ctx)
-  await until(() => lastOf(o, 'issue'))
-  page.edit(o, 'hi', '21')
+  const o = await openReply(ctx)
+  edit(o, OWNER, 'hi', '21')
   g.armed = true
-  const click = o.click('send', OWNER)
+  post(o, OWNER, 'hi', '21')
   await until(() => g.hit > 0)
   await ctx.changeSettings({ ...CONFIGURED, writes: 'off' })
   g.open()
-  await click
+  // With writes off the copies no longer get the form (no Reply tab); the write stopped at its guard.
+  await new Promise((r) => setTimeout(r, 50))
   assert.equal(jira.writes.length, 0)
+  assert.equal(kitView(o, 'c-owner').state.reply, false)
   await h.stop()
 })
 
@@ -476,73 +549,3 @@ test('R2-2: writes switched off while the client settles its token kind (before 
   await h.stop()
 })
 
-test('R2-3: a fill the page refused, answered after the wait, does not leave every later click refused', async () => {
-  const { ctx, h, jira, page } = boot({ draftWaitMs: 50 })
-  await h.pollNow('test')
-  await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })
-  const [o] = replyPages(ctx)
-  // The person types (their edit message still on the way) as a second draft arrives; the page keeps
-  // their words and its "not applied" answer comes after the host stopped waiting.
-  page.state(o).dirty = true
-  page.state(o).comment = 'my words'
-  page.hold = true
-  await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'second' })
-  await new Promise((r) => setTimeout(r, 150)) // past the host's own wait for the page's answer
-  page.release()
-  await until(() => h.S && [...o.posts].some((m) => m.type === 'issue' && m.fill && m.fill.n === 2))
-  await o.click('send', OWNER)
-  assert.deepEqual(jira.writes.map((w) => [w.what, w.body.body.content[0].content[0].text]), [['comment', 'my words']])
-  await h.stop()
-})
-
-test('R2-4: a click refused after the collect leaves the button usable, also when a load finished meanwhile', async () => {
-  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
-  const { ctx, h, jira, page } = boot({ jira: { routes: g.route } })
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'reply', key: 'ABC-1' }, OWNER)
-  const [o] = replyPages(ctx)
-  await until(() => lastOf(o, 'issue'))
-  page.edit(o, 'hi')
-  g.armed = true
-  o.send({ type: 'reload' }, OWNER) // a re-read under way (Try again)
-  await until(() => g.hit > 0)
-  let answer
-  page.onCollect = (q, m, st) => (answer = () => q.send({ type: 'values', n: m.n, comment: st.comment, transitionId: '', rev: 99 }))
-  const click = o.click('send', OWNER)
-  await until(() => answer)
-  g.armed = false
-  g.open() // the load finishes while the click waits for the page's values
-  await until(() => o.posts.filter((m) => m.type === 'issue').length >= 2)
-  answer() // values of a revision the host did not see drawn: refused
-  await click
-  assert.equal(jira.writes.length, 0)
-  assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled), Boolean(b.busy)]), [['Post comment', false, false]])
-  await h.stop()
-})
-
-test('R3: a late refused fill leaves the person\'s typed words and an enabled button, not the draft\'s empty form', async () => {
-  const g = gate((url, init) => init.method !== 'POST' && url.includes('/transitions'))
-  const { ctx, h, jira, page } = boot({ draftWaitMs: 50, jira: { routes: g.route } })
-  await h.pollNow('test')
-  await ctx.runCli(['update', 'ABC-1', '-'], { stdin: 'first' })
-  const [o] = replyPages(ctx)
-  // A status-only draft to a status Jira does not offer (its fill is an empty form), its reads pending.
-  g.armed = true
-  page.hold = true
-  const cli = ctx.runCli(['update', 'ABC-1', '--status', 'Nowhere'])
-  await until(() => g.hit > 0)
-  // The person types meanwhile: the page will keep their words over the fill, and its "not applied"
-  // answer reaches the host only after the host stopped waiting.
-  page.edit(o, 'my words')
-  g.armed = false
-  g.open()
-  await cli
-  await until(() => o.posts.some((m) => m.type === 'issue' && m.fill && m.fill.n === 2))
-  await new Promise((r) => setTimeout(r, 150)) // past the host's own wait for the page's answer
-  assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled)]), [['Post comment', false]], 'the visible comment can be sent')
-  page.release()
-  assert.deepEqual(o.buttons.map((b) => [b.label, Boolean(b.disabled)]), [['Post comment', false]], 'the late answer keeps it')
-  await o.click('send', OWNER)
-  assert.deepEqual(jira.writes.map((w) => [w.what, w.body.body.content[0].content[0].text]), [['comment', 'my words']])
-  await h.stop()
-})

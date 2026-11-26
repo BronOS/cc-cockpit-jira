@@ -1,10 +1,12 @@
 {
   "id": "bronos.jira",
   "name": "Jira",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. Comments and status changes from a reply page; ccc jira update drafts them for you to post (or writes directly, or is off: a setting). Provides the jira service (issue status, the issue view) to other plugins, such as bronos.gmail, and an inbox-feed of your issues for Inbox.",
+  "overlays": { "perView": true },
+  "guests": { "aware": true },
+  "description": "Your Jira Cloud issues in lanes (Backlog, In progress, Mentioned, On hold, Done), unread marks, sorted by Jev triage, discussed with Claude. An issue opens in its own window with notes, Ask and Reply (a comment or a status change); ccc jira update drafts one for you to post (or writes directly, or is off: a setting). Shows the issue beside a Gmail mail or a calendar event that names it. Provides the jira service (issue status, the issue window) to other plugins, such as bronos.gmail, and an inbox-feed of your issues for Inbox.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -141,7 +143,7 @@
           "writes": {
             "type": "string",
             "title": "What ccc jira update does",
-            "description": "Claude drafts, I post: ccc jira update opens the reply page filled in and writes nothing until you click. ccc writes directly: it posts the comment and moves the issue itself. Read-only: the command is refused and the panel offers no Reply. The reply page always waits for your click.",
+            "description": "Claude drafts, I post: ccc jira update fills Reply in the issue's window and writes nothing until you click. ccc writes directly: it posts the comment and moves the issue itself. Read-only: the command is refused and the window offers no Reply. Reply always waits for your click.",
             "oneOf": [
               { "const": "draft", "title": "Claude drafts, I post" },
               { "const": "direct", "title": "ccc writes directly" },
@@ -164,12 +166,11 @@
   },
   "services": {
     "provides": {
-      "jira": 1,
+      "jira": 2,
       "inbox-feed": 2
     },
     "uses": {
-      "triage": 1,
-      "reviewer": 1
+      "triage": 1
     }
   }
 }

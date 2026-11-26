@@ -1,6 +1,7 @@
 'use strict'
 // bronos.jira: your Jira Cloud issues in lanes, sorted by jev-triage; since 0.8.0 a comment and a
-// status change from the reply page (section "writing to Jira" below; design "Writing to Jira").
+// status change from Reply (section "writing to Jira" below; design "Writing to Jira"); since 0.9.0 an
+// issue opens in its own window (section "the issue window": notes, Ask and Reply in every view).
 // Plain JavaScript with no build step; the pure logic is in ./lib (node:test suites in test/).
 // Design: docs/design.md. The app API: `ccc guide api` (this file uses only what it documents).
 //
@@ -16,7 +17,7 @@ const { poll, buildView, allRows, loadCache } = require('./lib/poll')
 const { loadSeen, seed, markRead, markUnread, emptySeen, bound } = require('./lib/seen')
 const { triageItem, mentionedBy } = require('./lib/triage')
 const { readableText, browseUrl, discussPrompt } = require('./lib/readable')
-const { pickTab, openerArgv, isMissingAnnotate } = require('./lib/actions')
+const { pickTab, openerArgv } = require('./lib/actions')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
 const { hashOf, oneLine, cut, issueKey } = require('./lib/util')
@@ -27,8 +28,10 @@ const feed = require('./lib/feed')
 const { headerSpec } = require('./lib/header')
 const { selectImages, gatherImages, imageCache, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_TOTAL_CHARS, WAIT_MS } = require('./lib/images')
 const wr = require('./lib/write')
-// The reply page's own decisions (a classic script the page loads too): the toolbar's label follows them.
-const { replyAction, keepChoice } = require('../panels/replylogic')
+// The Reply tab's own decisions (a classic script the page loads too): the kept move choice.
+const { keepChoice } = require('../panels/replylogic')
+// The overlay kit's host side (vendored and pinned, D9; test/kit-pin.test.js checks the bytes).
+const { makePage } = require('../vendor/cc-kit/host/shared-page')
 const path = require('node:path')
 
 const PANEL = 'main'
@@ -36,26 +39,13 @@ const SOURCE = 'jira' // the triage source name: verdicts, overrides and cases g
 const TRIAGE_CHUNK = 500 // triage.classify takes at most 500 items a call
 const ROWS_PER_LANE = 300 // the panel message stays far below the 1 MiB post limit
 const CLI_WAIT_MS = 25000 // `ccc` gives a handler 30 s
-// How long the reviewer's prepare and cancel may take: host-local calls, far under this.
-const REVIEWER_WAIT_MS = 2000
 // ctx.overlay.start gives no "shown" signal: main's refusal (3 open, 10 a minute) rejects the handle's
 // `result` within one host-to-main round trip, while an overlay that opened settles only when it
-// closes. Our reader page counts as up once this long passed without a rejection (the bundled
-// reviewer's prepare and annotate wait the same).
+// closes. The issue window counts as up once this long passed without a rejection.
 const OVERLAY_SETTLE_MS = 500
-// The reviewer an older app's overlays are trusted from (one without ctx.services.provider, which
-// cannot name the provider a project picked): the bundled one, since a `cockpit.*` id loads only from
-// the app's own bundle. A newer app names the picked `reviewer` instead (reviewerId), so a
-// replacement reviewer gets our item buttons and the bundled one, not picked, does not.
-const FALLBACK_REVIEWER_ID = 'cockpit.reviewer'
 const IMAGE_TIMEOUT_MS = 20000 // one attachment download, redirects and body included
-// The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON
-// (`ccc guide panels`), and JSON can double a string (quotes, backslashes).
-const PAGE_HTML_PART = 400000
-// The reply page (0.8.0): how long a CLI draft waits for the page to read the issue and take the
-// draft (the answer comes before ccc's 30 s), and how long a toolbar click waits for the page's values.
+// How long a CLI draft waits for the issue's header and moves to be read (the answer comes before ccc's 30 s).
 const DRAFT_WAIT_MS = 20000
-const PAGE_ANSWER_MS = 5000
 
 let instance = null
 
@@ -69,7 +59,6 @@ function start(ctx, io = {}) {
   const now = io.now || Date.now
   const draftWaitMs = io.draftWaitMs || DRAFT_WAIT_MS // the suites shorten it
   const triage = ctx.services.use('triage')
-  const reviewer = ctx.services.use('reviewer')
   const cacheFile = jsonFile(ctx.dataDir, 'cache.json')
   const abort = new AbortController()
 
@@ -91,8 +80,6 @@ function start(ctx, io = {}) {
     sigs: {}, // key -> hash of the triage item it was judged on
     triageError: null,
     classifying: Promise.resolve(),
-    annotateMissing: false, // set when a call proved the reviewer has no annotate
-    htmlRejected: null, // the reviewer's message when annotate took text but refused html (0.7/early 0.8)
     ui: { collapsed: {}, expanded: {} }, // per lane id; `expanded` = Show all pressed
     notice: null, // { text, kind: 'info'|'error' } after an action, until dismissed or replaced
     choose: null, // { key, tabs } when Discuss needs the person to pick a tab
@@ -105,8 +92,7 @@ function start(ctx, io = {}) {
   }
 
   const cfg = () => S.settings.cfg
-  // Writing to Jira (0.8.0): the open reply pages by issue key (openReply), and whether writes are on.
-  const replies = new Map()
+  // Writing to Jira (0.8.0): whether writes are on (the forms are in "writing to Jira" below).
   const writesOn = () => cfg().writes !== 'off'
 
   // ---- stored state ----
@@ -180,9 +166,6 @@ function start(ctx, io = {}) {
 
   function triageOn() {
     return ctx.services.available('triage')
-  }
-  function annotateOn() {
-    return !S.annotateMissing && ctx.services.available('reviewer')
   }
 
   // ---- polling ----
@@ -353,10 +336,14 @@ function start(ctx, io = {}) {
       S.error = null
     }
     if (connectionKey(before) !== connectionKey(after)) S.client = null
-    // Writing turned off, or another site or account: an open reply page would write where the
-    // person no longer means to. Closed (its text was the person's to post; nothing was written).
-    if (after.writes === 'off' || before.site !== after.site || before.email !== after.email || connectionKey(before) !== connectionKey(after)) {
-      for (const page of replies.values()) closeQuietly(page.handle)
+    // Writing turned off, or another site or account: an unsent Reply would write where the person no
+    // longer means to. Dropped (its text was the person's to post; nothing was written). A window of the
+    // old site closes; with writes off the windows stay and their copies lose the Reply tab.
+    const moved = before.site !== after.site || before.email !== after.email || connectionKey(before) !== connectionKey(after)
+    if (after.writes === 'off' || moved) {
+      for (const [key, form] of forms) if (!form.busy) forms.delete(key)
+      if (moved) for (const win of [...windows.values()]) closeQuietly(win.handle)
+      else for (const win of windows.values()) if (win.state) win.page.set(win.state, { document: win.state.html })
     }
     // The service's answers belong to the old site or account (and the senders may have changed).
     lookups.clear()
@@ -429,100 +416,317 @@ function start(ctx, io = {}) {
     } catch {}
   }
 
+
+  // ---- the issue window (0.9.0; the overlay foundation's layout A) ----
+  //
+  // One perView overlay per issue (`windows`, by key), opened before the issue is read so something is on
+  // screen at once. The kit's makePage (vendor/cc-kit/host/shared-page.js) greets each copy with the access the app
+  // gave it (owner, a write guest, a read guest; never the page's word), replays the issue to every copy, keeps the
+  // owner's last side tab, and opens only links that are in the issue. The page (panels/issue.js) draws the issue
+  // with the kit's renderer, the notes (`notes: { key: 'jira:<KEY>' }`: core keeps them, in every view, over Esc),
+  // Ask (core's chat) and the Reply tab. Reply's form lives here (`forms`), not in a page, so one Esc never
+  // loses it and every write copy shows the same draft. Discuss with Claude and New session are core's toolbar.
+
+  const windows = new Map() // issue key -> the open window (win)
+  // A draft opens Reply (D7): a copy that connects this soon after the request starts there too.
+  const SELECT_MS = 30000
+
+  /** Owner or write guest, from the app's `from` only. A missing or malformed `from` refuses: no owner default. */
+  const writer = (from) => Boolean(from) && typeof from === 'object' && (from.access === 'owner' || from.access === 'write')
+  const isOwner = (from) => Boolean(from) && typeof from === 'object' && from.access === 'owner'
+  const mayReply = (from) => writer(from) && writesOn()
+
   /**
-   * Open: the issue as styled HTML with its images in the reviewer (cc-cockpit 0.8.0), else as
-   * plain text in the reviewer (a reviewer whose annotate takes text only), else in our own page.
-   * The chain, each step taken once a call proved the one before is not there:
-   *   annotate({ html, assets }) -> rejected (not "no method") -> annotate({ text })
-   *   -> "no method annotate" (0.7.0) or no reviewer -> panels/issue.html with the same HTML.
-   * A refusal of html is remembered for the run only when the text call then worked, so a
-   * failure that has nothing to do with html (the overlay could not open) does not switch modes.
-   * The reviewer's overlay is up before the issue is read (its prepare, where it has one): reading
-   * the issue with its comments and images takes seconds, with nothing on screen meanwhile
-   * (real-work feedback 8). The annotate below fills that overlay; a failed read with no cached copy
-   * turns it into the error page with Try again where the reviewer has `fail` (failView); whatever
-   * else happens (an older reviewer's failed read, our own reader page) closes it in the finally.
-   * `onStarted` (feed act) runs only once something is on screen: the prepared overlay, our reader
-   * page, or (neither: a reviewer without prepare, a prepare that failed or ran past its wait) the
-   * filled view at the end. Called earlier, a failed read reached only this panel's notice while
-   * the person clicked in Inbox, and Inbox ended the item's "back" mark for an open never seen.
+   * Open (or focus) the issue's window: up at once, filled once the issue is read. `onStarted` (feed act) runs once
+   * the app did not refuse the overlay; `o.reply` selects Reply in the owner's and write guests' copies (a Reply
+   * click, a draft). Resolves after the read (a failed read is the window's error page with Try again, and the
+   * panel's notice); throws when the app refused the window.
    */
-  async function openIssue(key, onStarted) {
-    const shown = () => {
-      if (onStarted) onStarted()
-    }
-    const pre = await prepareView(key)
-    // Without the reviewer our own reader page is the overlay, so it is up before the issue is read
-    // (`ready: 'manual'`: its loader stays until the page has drawn the issue).
-    const early = pre || annotateOn() ? null : startReader(key)
-    // Our page counts once main did not refuse it (a refused one fails the open in plainReader).
-    if (pre) shown()
-    else if (early) void early.refusal.then((e) => e || shown())
-    try {
-      await showIssue(key, pre, early, shown)
-    } finally {
-      // A loader turned into the read's error page (failView) stays: it is the person's to close.
-      if (pre && !pre.failed) await cancelView(pre)
-      if (early && !early.used) closeQuietly(early.handle)
-    }
+  async function openIssue(key, onStarted, o = {}) {
+    const win = await showWindow(key, o)
+    if (onStarted) onStarted()
+    if (win.loaded) return win.loaded
   }
 
-  // Issues whose reviewer loader shows a failed read with Try again (failView): reviewer key -> issue key.
-  const failedViews = new Map()
-
-  /**
-   * A read that failed after the reviewer's loader was up, with no cached copy to show instead
-   * (fullIssue falls back to the last poll's copy of an issue in the lanes): the loader shows the
-   * error with Try again (the reviewer's `fail`, cc-cockpit 0.13.2) instead of closing. Cancelling it,
-   * as before, made a network outage flash the overlay open and shut with no reason on screen: the
-   * error reached only this panel's notice, which a click in Inbox never shows. The act contract
-   * stays: the loader was on screen, so the feed's act answered ok at prepare; no seen mark is set
-   * (seen() never ran). True when the reviewer took it; false (an older reviewer without 'fail', the
-   * person closed the loader meanwhile) leaves the cancel to openIssue's finally, as before.
-   */
-  async function failView(pre, key, e) {
-    const msg = oneLine(e && e.message ? e.message : String(e))
-    const head = (e && (e.kind === 'network' || e.kind === 'timeout')) || /^cannot reach /i.test(msg) ? "Can't reach Jira" : 'Could not load this issue'
-    try {
-      const features = await within(reviewer.features(), REVIEWER_WAIT_MS)
-      if (!Array.isArray(features) || !features.includes('fail')) return false
-      // Try again only when its click can reach us (the event `action`).
-      const retry = typeof reviewer.on === 'function'
-      const r = await within(reviewer.fail({ key: pre.key, message: cut(`${head}: ${msg}`, 300), retry }), REVIEWER_WAIT_MS)
-      if (!(r && r.failed)) return false
-      if (retry) failedViews.set(pre.key, key)
-      return true
-    } catch (err) {
-      ctx.log.warn(`reviewer.fail: ${err && err.message ? err.message : err}`)
-      return false
+  /** The window of `key` on screen (focused when it was open already), its read started; throws on a refusal. */
+  async function showWindow(key, o = {}) {
+    await ready
+    if (!S.settings.ready) throw notConfigured()
+    const reply = Boolean(o.reply) && writesOn()
+    const open = windows.get(key)
+    if (open && !open.ended) {
+      try {
+        open.handle.focus()
+      } catch {}
+      if (reply) selectReply(open)
+      return open
     }
+    const win = startWindow(key)
+    if (reply) selectReply(win)
+    const refused = await overlayRefusal(win.handle)
+    if (refused) {
+      endWindow(win)
+      throw new Error(`Cannot open ${key}: ${refused.message || refused}`)
+    }
+    win.loaded = loadWindow(win).catch((e) => {
+      const msg = e && e.message ? e.message : String(e)
+      ctx.log.warn(`open ${key}: ${msg}`)
+      setNotice(`Could not open ${key}: ${msg}`, 'error')
+    })
+    return win
   }
 
-  /**
-   * Try again on an error page of ours (the reviewer's event `action` { key, id: 'retry', caller }):
-   * the normal open again, so the reviewer takes the page back to its loader (prepare), and the
-   * issue or the error once more fills it. Events reach every consumer: only our own key counts.
-   */
-  async function onReviewerAction(d) {
-    if (!d || d.caller !== ctx.pluginId || d.id !== 'retry' || typeof d.key !== 'string') return
-    const key = failedViews.get(d.key)
-    if (key === undefined) return
-    failedViews.delete(d.key)
+  /** The overlay and its page helper; throws when the app refused `start` itself or is too old for copies. */
+  function startWindow(key) {
+    const row = rowOf(key)
+    const summary = row ? row.issue.summary : ''
+    // The overlay API cannot retitle an open overlay: with no cached summary the title is the bare key.
+    const handle = ctx.overlay.start({
+      kind: 'html',
+      file: 'panels/issue.html',
+      title: summary ? `${key}: ${cut(oneLine(summary), 80)}` : key,
+      size: 'large',
+      type: overlayType(key),
+      // Core's notes and Ask (app 0.28.0); an older app ignores the key and the page goes without them.
+      notes: { key: `jira:${key}` },
+      buttons: [{ id: 'browser', label: 'Open in Jira ↗' }],
+    })
+    if (typeof handle.onConnect !== 'function') {
+      // An app before overlays in every view (0.27.0) names no copy and no access: fail closed, nothing shown.
+      closeQuietly(handle)
+      throw new Error('this Jira version needs cc-cockpit 0.27.0 or later')
+    }
+    const page = makePage(handle, {
+      ctx,
+      project: (state, from) => ({ ...state, reply: mayReply(from) }),
+      // Ask first (D7), then the owner's last used; a read guest has neither tab (the page shows no column).
+      tabs: { ids: ['ask', 'reply'], first: 'ask' },
+      guestError: 'This issue could not be loaded.',
+    })
+    const win = { key, handle, page, ended: false, issue: null, text: '', loadSeq: 0, seen: false, selectAt: 0, loaded: null }
+    windows.set(key, win)
+    const end = () => endWindow(win)
+    handle.result.then(end, end)
+    page.onMessage((m, from) => onWindowMessage(win, m, from))
+    handle.onConnect((from) => onCopy(win, from))
+    if (typeof handle.onButton === 'function') handle.onButton('browser', (from) => openFor(browseUrl(cfg().site, key), from))
+    if (typeof handle.onDiscuss === 'function') {
+      handle.onDiscuss(() => (win.issue ? { text: discussPrompt(win.issue, win.text) } : null))
+    }
+    // Core's Ask (app 0.28.0): the issue as text for the chat; core already refuses a read guest, and so do we.
+    if (typeof handle.onAsk === 'function') handle.onAsk((from) => (writer(from) && win.issue ? { text: win.text } : null))
+    return win
+  }
+
+  function endWindow(win) {
+    if (win.ended) return
+    win.ended = true
+    if (windows.get(win.key) === win) windows.delete(win.key)
+    win.page.dispose()
+  }
+
+  /** Read the issue into the window: loading, then the issue, or the error page with Try again (the owner's). */
+  async function loadWindow(win) {
+    const n = ++win.loadSeq
+    const current = () => !win.ended && n === win.loadSeq
+    win.page.loading()
+    let got
     try {
-      await openIssue(key)
+      got = await fullIssue(win.key)
     } catch (e) {
-      // As a panel click's open: the log and the notice, beside the error page the retry put up again.
-      ctx.log.warn(`retry open: ${e && e.message ? e.message : e}`)
-      setNotice(e && e.message ? e.message : String(e), 'error')
+      if (current()) {
+        const msg = e && e.message ? e.message : String(e)
+        const head = (e && (e.kind === 'network' || e.kind === 'timeout')) || /^cannot reach /i.test(msg) ? "Can't reach Jira" : 'Could not load the issue'
+        win.page.fail(cut(`${head}: ${msg}`, 300), { retry: () => void loadWindow(win).catch((err) => ctx.log.warn(`retry ${win.key}: ${err && err.message}`)) })
+      }
+      throw e
+    }
+    if (!current()) return
+    const { issue, lane, mark, stale } = got
+    const site = cfg().site
+    const staleNote = stale ? `Jira could not be reached, this is the copy from the last poll: ${stale}` : ''
+    const v = await issueView(got, staleNote, false, {}, true)
+    if (!current()) return
+    win.issue = issue
+    win.text = readableText(issue, { site, mark, lane }) + (stale ? `\n\n(${staleNote})` : '')
+    win.got = got
+    win.state = { key: issue.key, summary: issue.summary || '', url: browseUrl(site, issue.key), html: v.html, assets: v.assets }
+    win.page.set(win.state, { document: v.html })
+    if (win.page.copies().some((c) => isOwner(c.from))) await seenOnOpen(win)
+  }
+
+  /**
+   * Opening marks the issue read only with the markReadOnOpen setting (off by default: an issue opened to glance
+   * at it, from Inbox above all, kept the unread mark the person meant as a to-do), once per window, when the
+   * issue reached an owner's copy (a guest looking is not the person reading). Read at that moment: a settings
+   * change during the read counts. Never throws.
+   */
+  async function seenOnOpen(win) {
+    if (win.seen || !win.got) return
+    win.seen = true
+    const issue = win.got.issue
+    if (!S.seen || !issue.full || !cfg().markReadOnOpen) return
+    try {
+      markRead(S.seen, issue, now())
+      await saveSeen()
+      rebuild()
+      postState()
+      emitFeed()
+      void classifyChanged()
+    } catch (e) {
+      ctx.log.warn(`marking ${win.key} seen: ${e && e.message ? e.message : e}`)
     }
   }
-  if (typeof reviewer.on === 'function') reviewer.on('action', (d) => void onReviewerAction(d).catch((e) => ctx.log.warn(`reviewer action: ${e && e.message ? e.message : e}`)))
+
+  /** A copy connected: an owner's marks the issue seen; an owner's or a write guest's gets the Reply form. */
+  function onCopy(win, from) {
+    if (!from || typeof from.copy !== 'string') return
+    if (isOwner(from) && win.issue) void seenOnOpen(win)
+    if (!mayReply(from)) return
+    const form = forms.get(win.key)
+    if (form) win.page.post(from.copy, replyMessage(form, false))
+    if (win.selectAt && now() - win.selectAt <= SELECT_MS) win.page.post(from.copy, { type: 'select', tab: 'reply' })
+  }
+
+  /** Reply selected in every copy that may reply, and in those connecting soon (a window just opened). */
+  function selectReply(win) {
+    win.selectAt = now()
+    const form = formOf(win.key)
+    if (!form.loaded && !form.loading) form.loading = loadForm(form, null)
+    for (const c of win.page.copies()) if (mayReply(c.from)) win.page.post(c.copy, { type: 'select', tab: 'reply' })
+  }
+
+  /** What a window's page says (the kit's own messages are handled by makePage). `from` is the app's. */
+  function onWindowMessage(win, m, from) {
+    if (!m || typeof m !== 'object' || win.ended) return
+    switch (m.type) {
+      case 'replyOpen': {
+        // The Reply tab was shown: its issue header and moves are read then, not on every open.
+        if (!mayReply(from)) return
+        const form = formOf(win.key)
+        if (!form.loaded && !form.loading) form.loading = loadForm(form, null)
+        else win.page.post(from.copy, replyMessage(form, false))
+        return
+      }
+      case 'edit':
+        return editForm(win, m, from)
+      case 'post':
+        return void postForm(win, m, from).catch((e) => ctx.log.warn(`post ${win.key}: ${e && e.message ? e.message : e}`))
+      case 'reload': {
+        if (!mayReply(from)) return
+        const form = formOf(win.key)
+        if (!form.busy && !form.loading) form.loading = loadForm(form, null)
+        return
+      }
+      case 'browser':
+        return void openFor(browseUrl(cfg().site, win.key), from)
+    }
+  }
+
+  /** An http(s) address in the clicking view (the app's link ask there); a missing view opens where the app decides. */
+  async function openFor(url, from) {
+    if (typeof ctx.openExternal !== 'function') return openUrl(url)
+    try {
+      await ctx.openExternal(url, from && typeof from.view === 'string' ? { view: from.view } : undefined)
+    } catch (e) {
+      setNotice(`Could not open ${url}: ${e && e.message ? e.message : e}`, 'error')
+    }
+  }
+
+  // ---- parts: an issue beside another plugin's window (D13) ----
+  //
+  // Gmail and Calendar announce what their window shows (`handle.announce({ kind: 'mail' | 'event', refs })`); a ref
+  // that is an issue key of a project this plugin knows gets our own part beside their page: a compact issue with
+  // Open issue. Their page never sees it (its own frame), and the refs are their data: checked here.
+
+  const partsOf = new Map() // parent overlay id -> { key, handle, page }
+  const ANNOUNCE_KINDS = ['mail', 'event']
+
+  /** The project keys this plugin knows: the polled issues' and the Mentioned setting's. */
+  function knownProjects() {
+    const out = new Set(cfg().mentionProjects || [])
+    const add = (key) => {
+      const k = typeof key === 'string' ? key.split('-')[0] : ''
+      if (k) out.add(k)
+    }
+    for (const name of ['assigned', 'done', 'candidates']) for (const h of (S.lists && S.lists[name]) || []) add(h && h.key)
+    if (S.cache && S.cache.issues) for (const k of Object.keys(S.cache.issues)) add(k)
+    return out
+  }
+
+  /** The first ref that is an issue key of a known project, or null (refs are another plugin's words). */
+  function issueRefOf(refs) {
+    if (!Array.isArray(refs) || !S.settings.ready) return null
+    const projects = knownProjects()
+    for (const r of refs.slice(0, 20)) {
+      if (typeof r !== 'string' || r.length > 200) continue
+      const key = issueKey(r.trim())
+      if (key && projects.has(key.split('-')[0])) return key
+    }
+    return null
+  }
+
+  function onAnnounce(a) {
+    if (S.stopped || !a || typeof a !== 'object' || !a.overlay || typeof a.overlay.id !== 'string') return
+    // Our own windows never get a part of ours.
+    if (a.overlay.opener === ctx.pluginId) return
+    const id = a.overlay.id
+    const key = issueRefOf(a.refs)
+    const had = partsOf.get(id)
+    if (had && had.key === key) return
+    if (had) {
+      partsOf.delete(id)
+      closeQuietly(had.handle)
+    }
+    if (!key) return
+    let handle
+    try {
+      handle = ctx.overlay.part(id, { file: 'panels/part.html', title: `Jira ${key}` })
+    } catch (e) {
+      ctx.log.info(`no part for ${key}: ${e && e.message ? e.message : e}`)
+      return
+    }
+    if (typeof handle.onConnect !== 'function') return closeQuietly(handle)
+    const page = makePage(handle, { ctx, project: (state, from) => ({ ...state, canOpen: isOwner(from) }), tabs: { ids: [] } })
+    const part = { key, handle, page, issue: null, text: '' }
+    partsOf.set(id, part)
+    const end = () => {
+      if (partsOf.get(id) === part) partsOf.delete(id)
+      page.dispose()
+    }
+    handle.result.then(end, end)
+    // Open issue: the owner's click only (it opens a window on the owner's screen); never a write.
+    page.onMessage((m, from) => {
+      if (m && m.type === 'open' && isOwner(from)) void openIssue(key).catch((e) => setNotice(e && e.message ? e.message : String(e), 'error'))
+    })
+    const text = async () => {
+      if (!part.text) {
+        const got = await fullIssue(key)
+        part.text = readableText(got.issue, { site: cfg().site, mark: got.mark, lane: got.lane })
+      }
+      return { text: part.text }
+    }
+    if (typeof handle.onDiscuss === 'function') handle.onDiscuss(() => text())
+    if (typeof handle.onAsk === 'function') handle.onAsk((from) => (writer(from) ? text() : null))
+    void serviceIssue(key, {}, ctx.pluginId).then(
+      (f) => {
+        if (partsOf.get(id) !== part) return
+        const state = { key: f.key, summary: f.summary, status: f.status, tone: wr.toneOf(f.category), priority: f.priority, type: f.type, assignee: f.assignee, url: f.url }
+        page.set(state, { document: f.url })
+      },
+      (e) => page.fail(cut(`Could not read ${key}: ${e && e.message ? e.message : e}`, 300))
+    )
+  }
+
+  if (ctx.overlay && typeof ctx.overlay.onAnnounce === 'function' && typeof ctx.overlay.part === 'function') {
+    for (const kind of ANNOUNCE_KINDS) ctx.overlay.onAnnounce(kind, (a) => onAnnounce(a))
+  }
+
 
   /** The `inbox-item` type of an issue overlay (Inbox's and the buttons' key). */
   function overlayType(key) {
     return { name: 'inbox-item', data: { source: ctx.pluginId, id: key } }
   }
-
   /**
    * The feed item an `inbox-item` overlay of ours names, or null (the data came from the opener: check it).
    * Only an issue still in the lanes counts: one that left them (Done lane, a lane switched off) is no item
@@ -536,34 +740,17 @@ function start(ctx, io = {}) {
   }
 
   /**
-   * Whether an overlay's opener may get our item buttons: we (the reader page) or the reviewer we hand
-   * the item to. `opener` is the app's record of who opened it (OverlayInfo), unlike `data`: another
-   * plugin opening an overlay that names one of our issues gets none of our item buttons.
+   * Whether an overlay's opener may get our item buttons: only we. `opener` is the app's record of who opened it
+   * (OverlayInfo), unlike `data`: another plugin opening an overlay that names one of our issues gets none.
    */
   function trustedOpener(opener) {
-    if (opener === ctx.pluginId) return true
-    const reviewer = reviewerId()
-    return typeof reviewer === 'string' && reviewer !== '' && opener === reviewer
+    return opener === ctx.pluginId
   }
 
   /**
-   * The plugin our `reviewer` calls reach right now, asked at button time (the project's pick can
-   * change while we run), or null when none does. An older app without ctx.services.provider: the
-   * bundled reviewer. A throw (not expected: `reviewer` is in our uses) trusts no reviewer.
-   */
-  function reviewerId() {
-    if (typeof ctx.services.provider !== 'function') return FALLBACK_REVIEWER_ID
-    try {
-      return ctx.services.provider('reviewer')
-    } catch {
-      return null
-    }
-  }
-
-  /**
-   * The item's actions but open, with `run` = the same code as the feed's `act`; labels follow the item's state.
-   * A refused act is shown in the panel's notice and thrown: the app only logs a run that throws, and an
-   * answer it does not read would make a failed Mark read silent.
+   * The item's actions but open (Mark read, Mark unread), with `run` = the same code as the feed's `act`; labels
+   * follow the item's state. A refused act is shown in the panel's notice and thrown: the app only logs a run that
+   * throws, and an answer it does not read would make a failed Mark read silent. Reply is the window's own tab.
    */
   function overlayButtons(info) {
     const item = ownItem(info)
@@ -575,33 +762,7 @@ function start(ctx, io = {}) {
         throw new Error(r.message)
       }
     }
-    const out = item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
-    // Reply (0.8.0): the reply page above this overlay, unless writing is off. The click's `from`
-    // (the app's word) must be the owner or a write guest; the setting is read again at the click.
-    if (writesOn()) {
-      out.push({
-        id: 'reply',
-        label: 'Reply',
-        run: async (_info, from) => {
-          if (!mayWriteOrNotice(from)) throw new Error('only the owner or a guest with write access can reply')
-          try {
-            await openReply(item.id)
-          } catch (e) {
-            setNotice(e && e.message ? e.message : String(e), 'error')
-            throw e
-          }
-        },
-      })
-    }
-    return out
-  }
-
-  /** What Discuss with Claude sends for an issue overlay: key and summary, status and the latest comment, capped. */
-  function overlayDiscuss(key) {
-    const item = feedItemOf(key)
-    if (!item) return null
-    const status = item.place && item.place.status ? item.place.status : ''
-    return { text: cut([`Jira issue: ${item.title}`, status ? `Status: ${status}` : '', item.preview ? `Latest: ${item.preview}` : ''].filter(Boolean).join('\n'), 4000) }
+    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
   }
 
   if (ctx.overlay && typeof ctx.overlay.buttons === 'function') {
@@ -612,147 +773,17 @@ function start(ctx, io = {}) {
   /** Resolves null once an overlay is up (no refusal within OVERLAY_SETTLE_MS, or it already ended), else main's refusal. */
   function overlayRefusal(handle) {
     let timer
-    const wait = new Promise((resolve) => (timer = setTimeout(resolve, OVERLAY_SETTLE_MS, null)))
+    const wait = new Promise((resolve) => (timer = setTimeout(resolve, io.overlaySettleMs === undefined ? OVERLAY_SETTLE_MS : io.overlaySettleMs, null)))
     return Promise.race([handle.result.then(() => null, (e) => e || new Error('refused')), wait]).finally(() => clearTimeout(timer))
-  }
-
-  /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
-  function within(p, ms) {
-    let timer
-    return Promise.race([p, new Promise((_, rej) => (timer = setTimeout(() => rej(new Error('the reviewer did not answer in time')), ms)))]).finally(() => clearTimeout(timer))
-  }
-
-  /**
-   * Opens the reviewer's overlay of an issue now, with its loader, under the key and title the
-   * annotate gives it (the summary from the last poll): `{ key }` when it did, else null (no reviewer
-   * with annotate, or one without prepare, which rejects with "has no method": the overlay then comes
-   * with the annotate, as before).
-   */
-  async function prepareView(key) {
-    if (!annotateOn()) return null
-    const row = rowOf(key)
-    const title = row && row.issue.summary ? `${key}: ${oneLine(row.issue.summary)}` : key
-    try {
-      // The type goes with prepare: the reviewer fixes an overlay's type when it starts, so the
-      // annotate that fills a prepared overlay cannot add it later (an older reviewer ignores it).
-      await within(reviewer.prepare({ key: `jira:${key}`, title: title.slice(0, 200), type: overlayType(key) }), REVIEWER_WAIT_MS)
-      return { key: `jira:${key}` }
-    } catch {
-      return null
-    }
-  }
-
-  /** Closes a prepared overlay no annotate filled; a no-op once one did. */
-  async function cancelView(pre) {
-    await within(reviewer.cancel({ key: pre.key }), REVIEWER_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
-  }
-
-  async function showIssue(key, pre, early, shown = () => {}) {
-    let got
-    try {
-      got = await fullIssue(key)
-    } catch (e) {
-      // The loader shows the failure (and openIssue leaves it); the error still goes on to the
-      // panel's notice and the log, as before.
-      if (pre) pre.failed = await failView(pre, key, e)
-      throw e
-    }
-    const { issue, lane, mark, stale } = got
-    const site = cfg().site
-    const staleNote = stale ? `Jira could not be reached, this is the copy from the last poll: ${stale}` : ''
-    const text = readableText(issue, { site, mark, lane }) + (stale ? `\n\n(${staleNote})` : '')
-    const url = browseUrl(site, key)
-    const title = `${key}: ${oneLine(issue.summary)}`
-    // Opening marks it read only with the markReadOnOpen setting (off by default: an issue opened to
-    // glance at it, from Inbox above all, lost the unread mark the person kept as a to-do). This is
-    // the one place an open touches the seen marks (the panel row and the feed's act 'open' both come
-    // through showIssue; the overlay buttons have no open; the CLI cannot open), so with the setting
-    // off an open changes nothing: no saveSeen, no emitFeed, so Inbox never gets an item event with
-    // read: true for a mere open, and Mark unread's flag stays. Mark read / Mark unread (setRead)
-    // work either way. Read at show time: a settings change during the read counts.
-    // With the setting on: the text and the HTML already have their new marks. Applied
-    // only once the issue is on screen (the same places shown() runs): marking it right after the
-    // read left an issue seen, and pushed read: true to Inbox, for an open then refused or a loader
-    // the person closed (annotate's { opened: false }) (phase-1 review round 4).
-    // Never throws: it runs inside the annotate tries, where a throw would read as a reviewer refusal.
-    const seen = async () => {
-      shown()
-      if (!S.seen || !issue.full || !cfg().markReadOnOpen) return
-      try {
-        markRead(S.seen, issue, now())
-        await saveSeen()
-        rebuild()
-        postState()
-        emitFeed()
-        void classifyChanged()
-      } catch (e) {
-        ctx.log.warn(`marking ${key} seen: ${e && e.message ? e.message : e}`)
-      }
-    }
-    const opened = (r) => !(r && r.opened === false)
-    // Two builds at most: the reviewer's (with the details column when it takes one) and our own
-    // reader page's (no column: the facts stay in the header card there).
-    const docs = {}
-    const view = async (aside = false) => (docs[aside] = docs[aside] || (await issueView(got, staleNote, aside)))
-    if (annotateOn()) {
-      const pick = pickTab(await ctx.sessions.list().catch(() => []))
-      // An older reviewer ignores `type`.
-      const base = { title, url, key: `jira:${key}`, type: overlayType(key), ...(pick.tabId ? { tabId: pick.tabId } : {}) }
-      let htmlError = null
-      if (!S.htmlRejected) {
-        // The details column needs a reviewer with `aside` (cc-cockpit 0.9.1+). No service says which
-        // options it takes, so the app's ctx.openExternal (the same release) stands in for that.
-        const v = await view(typeof ctx.openExternal === 'function')
-        try {
-          const r = await reviewer.annotate({ ...base, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
-          if (opened(r)) await seen()
-          return
-        } catch (e) {
-          if (isMissingAnnotate(e)) {
-            noAnnotate()
-          } else {
-            htmlError = e && e.message ? e.message : String(e)
-            ctx.log.info(`reviewer refused the html of ${key} (${htmlError}); trying text`)
-          }
-        }
-      }
-      if (!S.annotateMissing) {
-        try {
-          const r = await reviewer.annotate({ ...base, text })
-          if (htmlError) {
-            S.htmlRejected = htmlError
-            ctx.log.info('reviewer.annotate takes text only (cc-cockpit before 0.8.0 html mode): using text for this run')
-            postState()
-          }
-          if (opened(r)) await seen()
-          return
-        } catch (e) {
-          if (!isMissingAnnotate(e)) {
-            setNotice(`The reviewer could not open ${key}: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
-            return
-          }
-          noAnnotate()
-        }
-      }
-    }
-    // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
-    if (pre) await cancelView(pre)
-    await plainReader(issue, await view(), url, early, shown, seen)
-  }
-
-  // cc-cockpit before 0.8.0: no annotate. Remember it for this run and use our own page.
-  function noAnnotate() {
-    S.annotateMissing = true
-    ctx.log.info('reviewer has no annotate (cc-cockpit before 0.8.0): using the plugin\'s reader page')
-    postState()
   }
 
   /**
    * The issue as HTML plus the image assets: the image attachments chosen by images.selectImages,
    * from the cache or downloaded with the token, waited for at most WAIT_MS. With the cached copy
-   * (Jira unreachable) only cached images are used.
+   * (Jira unreachable) only cached images are used. `fold` (the issue window): the header card keeps the key
+   * facts as pills and folds the rest under More details (lib/document.js).
    */
-  async function issueView({ issue, raw, lane, mark, stale }, note, withAside, budget = {}) {
+  async function issueView({ issue, raw, lane, mark, stale }, note, withAside, budget = {}, fold = false) {
     const attachments = raw ? attachmentsOf(raw) : issue.attachments || []
     // `budget` (the jira service's document(): another plugin embeds the issue) can only lower the limits.
     const { wanted } = budget.maxImages === 0 ? { wanted: [] } : selectImages(attachments, { ...(budget.maxImages ? { max: budget.maxImages } : {}), ...(budget.maxImageChars ? { totalChars: budget.maxImageChars } : {}) })
@@ -772,79 +803,10 @@ function start(ctx, io = {}) {
       for (const f of r.failed) ctx.log.warn(`image ${f.id} of ${issue.key}: ${f.message}`)
       if (r.late) ctx.log.info(`${issue.key}: ${r.late} image(s) not downloaded in time, shown as links (cached for the next open)`)
     }
-    const doc = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note, aside: Boolean(withAside), ...(budget.maxHtmlBytes ? { maxBytes: budget.maxHtmlBytes } : {}) })
+    const doc = issueDocument({ issue, raw, site: cfg().site, mark, lane, assets: byAttachment, note, aside: Boolean(withAside), fold, ...(budget.maxHtmlBytes ? { maxBytes: budget.maxHtmlBytes } : {}) })
     return { html: doc.html, assets, aside: doc.aside }
   }
 
-  /**
-   * Starts the reader page's overlay (before the issue is read when it can); null when the app refuses.
-   * The overlay API cannot retitle an open overlay, so with no cached summary the title is the bare key
-   * (no dangling `KEY: `).
-   */
-  function startReader(key, issue) {
-    const row = issue ? null : rowOf(key)
-    const summary = issue ? issue.summary : row ? row.issue.summary : ''
-    try {
-      const handle = ctx.overlay.start({ kind: 'html', file: 'panels/issue.html', title: summary ? `${key}: ${cut(oneLine(summary), 80)}` : key, size: 'large', ready: 'manual', type: overlayType(key) })
-      if (typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(key))
-      // `refusal`: null once the page is up (OVERLAY_SETTLE_MS without a rejection, or the person
-      // closed it), else main's refusal; `ended` turns true once the overlay ended.
-      const started = { handle, used: false, ended: false, refusal: overlayRefusal(handle) }
-      const end = () => (started.ended = true)
-      handle.result.then(end, end)
-      return started
-    } catch (e) {
-      setNotice(`Cannot open the reader: ${e.message}`, 'error')
-      return null
-    }
-  }
-
-  /**
-   * Without the reviewer's annotate: our own read-only page with Discuss, New session and ↗. It
-   * gets the same HTML (built by escaping, see lib/adfhtml.js) in parts, then one message per
-   * image, so no message passes the page limit. A link click in the page comes back as `{ open }`.
-   */
-  async function plainReader(issue, view, url, early, shown = () => {}, seen = shown) {
-    const started = early || startReader(issue.key, issue)
-    if (!started) return
-    started.used = true
-    // start() returns a handle even for an overlay main refuses; the refusal only rejects `result`.
-    const refused = await started.refusal
-    if (refused) return setNotice(`Cannot open the reader: ${refused.message}`, 'error')
-    // On screen now; the wait below lasts until the person closes the page (feed act answers here).
-    shown()
-    const handle = started.handle
-    const parts = []
-    for (let i = 0; i < view.html.length; i += PAGE_HTML_PART) parts.push(view.html.slice(i, i + PAGE_HTML_PART))
-    let posted = false
-    try {
-      // With the app's overlay toolbar (Discuss with Claude, New session) the page drops its own two buttons.
-      const toolbar = typeof ctx.overlay.buttons === 'function' && typeof handle.onDiscuss === 'function'
-      handle.post({ type: 'doc', key: issue.key, summary: issue.summary, url, parts: parts.length, assets: view.assets.length, ...(toolbar ? { toolbar: true } : {}) })
-      parts.forEach((part, i) => handle.post({ type: 'html', i, part }))
-      for (const a of view.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
-      posted = true
-    } catch (e) {
-      ctx.log.warn(`posting ${issue.key} to the reader: ${e.message}`)
-      // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
-      setNotice(`Cannot show ${issue.key}: ${e.message}`, 'error')
-      closeQuietly(handle)
-    }
-    // Seen only when the issue reached a page still open: a post after the person closed the loader
-    // is a silent no-op, so they never saw it.
-    if (posted && !started.ended) await seen()
-    handle.onMessage((m) => {
-      if (m && typeof m.open === 'string') void openUrl(m.open).catch((e) => setNotice(e.message, 'error'))
-    })
-    const res = await handle.result.catch((e) => {
-      setNotice(`The reader failed: ${e.message}`, 'error')
-      return null
-    })
-    const action = res && res.kind === 'value' && res.value && typeof res.value === 'object' ? res.value.action : null
-    if (action === 'discuss') await discuss(issue.key)
-    else if (action === 'newSession') await newSession(issue.key)
-    else if (action === 'browser') await openBrowser(issue.key)
-  }
 
   async function issuePrompt(key) {
     const { issue, lane, mark } = await fullIssue(key)
@@ -875,7 +837,7 @@ function start(ctx, io = {}) {
     return openUrl(browseUrl(cfg().site, key))
   }
 
-  /** An http(s) address in the system browser (the ↗ button, a link in the reader page). */
+  /** An http(s) address in the system browser (Open in Jira ↗, a link in the issue window). */
   async function openUrl(url) {
     if (!/^https?:\/\//i.test(url)) return setNotice(`Only web links open from here; the address: ${cut(url, 300)}`)
     // cc-cockpit 0.9.1+: the app opens it, as it opens any link. A plugin host's environment has
@@ -910,369 +872,246 @@ function start(ctx, io = {}) {
   }
 
 
-  // ---- writing to Jira (0.8.0; design "Writing to Jira") ----
+  // ---- writing to Jira (0.8.0; design "Writing to Jira"; 0.9.0: the issue window's Reply tab) ----
   //
-  // A comment and/or a status change on one issue, made only on the reply page (panels/reply.html),
-  // one page per issue, by the person's click. `ccc jira update` prepares a page (writes: draft, the
-  // default) or writes itself (direct) or is refused (off); the setting is read on every call, for
-  // every caller, here in the host: a description can tell Claude to close the ticket, and a skill or
-  // a permission rule on Claude's side can be walked around. Every click that writes is checked
-  // against the app's `from.access` (owner or write guest). The pure rules are in lib/write.js.
+  // A comment and/or a status change on one issue, made only from the Reply tab of the issue's window, by a
+  // person's click. `ccc jira update` prepares a draft there (writes: draft, the default) or writes itself (direct)
+  // or is refused (off); the setting is read on every call, for every caller, here in the host: a description can
+  // tell Claude to close the ticket, and a skill or a permission rule on Claude's side can be walked around. Every
+  // click that writes is checked against the app's `from.access` (owner or write guest; a missing `from` refuses).
+  //
+  // One form per issue (`forms`), kept here over Esc and shared by every owner and write-guest copy: an edit in
+  // one copy reaches the others (last write wins), and "edited" means any copy typed, so a draft from ccc never
+  // replaces anyone's words. A read guest's copy never gets the form. A Post is taken only when the values it carries
+  // are the form's (a draft or another copy's edit that came in between refuses it): the click binds to what was shown.
+
+  const forms = new Map() // issue key -> form
+  const FORMS_MAX = 50 // unsent forms kept; the oldest untouched one goes first
+  const FORM_TEXT_MAX = 100000 // what a page may put in the comment box here (Post refuses past wr.MAX_COMMENT)
 
   function mayWriteOrNotice(from) {
-    if (wr.mayWrite(from)) return true
+    if (writer(from)) return true
     setNotice('Only the owner or a guest with write access can write to Jira.', 'error')
     return false
   }
 
-  /** `p`, or `fallback` after `ms` (a wait that must not hold a CLI answer or a click forever). */
+  /** `p`, or `fallback` after `ms` (a wait that must not hold a CLI answer forever). */
   function settleWithin(p, ms, fallback) {
     let timer
     return Promise.race([p, new Promise((r) => (timer = setTimeout(r, ms, fallback)))]).finally(() => clearTimeout(timer))
   }
 
-  function postReply(page, m) {
-    if (page.closed) return
-    try {
-      page.handle.post(m)
-    } catch (e) {
-      ctx.log.warn(`reply page ${page.key}: ${e && e.message ? e.message : e}`)
-    }
-  }
-
-  /** The toolbar's one button, its label from the page's current values (replylogic.replyAction). */
-  function updateButton(page) {
-    if (!page.toolbar || page.closed) return
-    const a = replyAction(page.form.comment, page.form.transitionId)
-    const spec = [{ id: 'send', label: a.label, primary: true, disabled: a.disabled || !page.loaded || page.busy, ...(page.busy ? { busy: true } : {}) }]
-    const json = JSON.stringify(spec)
-    if (json === page.button) return
-    page.button = json
-    try {
-      page.handle.setButtons(spec)
-    } catch (e) {
-      ctx.log.warn(`reply page buttons: ${e && e.message ? e.message : e}`)
-    }
-  }
-
   /** The transitions as the page lists them (plain data; the page builds the options with replylogic.moveOption). */
   const pageTransitions = (list) => list.map((t) => ({ id: t.id, name: t.name, to: t.to, enabled: t.enabled, why: t.why }))
 
+  /** The form of `key`, made empty when there is none (the oldest untouched one goes past FORMS_MAX). */
+  function formOf(key) {
+    let form = forms.get(key)
+    if (form) return form
+    form = { key, comment: '', transitionId: '', marker: '', asked: '', edited: false, busy: false, v: 0, loaded: false, loading: null, loadError: '', status: '', tone: 'neutral', transitions: [], note: null }
+    forms.set(key, form)
+    if (forms.size > FORMS_MAX) {
+      const old = [...forms.values()].find((f) => f !== form && !f.edited && !f.busy && !windows.has(f.key))
+      if (old) forms.delete(old.key)
+    }
+    return form
+  }
+
+  /** The form as a copy gets it; `own`: the copy whose edit this answers keeps its own fields (it may have typed on). */
+  function replyMessage(form, own) {
+    return {
+      type: 'reply',
+      v: form.v,
+      ...(own ? { own: true } : { comment: form.comment, transitionId: form.transitionId }),
+      marker: form.marker,
+      asked: form.asked,
+      edited: form.edited,
+      busy: form.busy,
+      loaded: form.loaded,
+      loadError: form.loadError,
+      status: form.status,
+      tone: form.tone,
+      transitions: pageTransitions(form.transitions),
+      max: wr.MAX_COMMENT,
+      note: form.note,
+    }
+  }
+
+  /** The form to every copy of the issue's window that may reply; `own` names the copy that made the change. */
+  function syncForm(form, own) {
+    const win = windows.get(form.key)
+    if (!win || win.ended) return
+    for (const c of win.page.copies()) if (mayReply(c.from)) win.page.post(c.copy, replyMessage(form, c.copy === own))
+  }
+
+  /** A line for one copy only (a refused click): the form is unchanged. */
+  function noteTo(win, from, text) {
+    win.page.post(from.copy, { type: 'replyNote', kind: 'error', text: cut(oneLine(text), 600) })
+  }
+
   /**
-   * Read the issue's header and its transitions for the page (each time the page opens or a draft
-   * replaces its content: workflows differ per project and status) and post them. With `fill` (a
-   * draft, or the empty form of a Reply click) the page replaces its fields and answers `filled`;
-   * one the person typed into since the last fill keeps its words and answers `applied: false`
-   * (the race of a draft arriving while they type), which counts as edited.
-   * Resolves `{ ok, applied, asked, error }`; never rejects.
+   * Read the issue's header and moves for the form (each time Reply opens or a draft fills it: workflows differ per
+   * project and status). With `fill` (a draft) the form takes it, unless a copy typed or another fill came while
+   * the issue was read (`applied: false`). Resolves `{ ok, applied, asked, error }`; never rejects.
    */
-  async function loadReply(page, fill) {
-    const key = page.key
+  async function loadForm(form, fill) {
+    const v0 = form.v
     let head
     let transitions
     try {
       await ready
-      ;[head, transitions] = await Promise.all([client().issueHeader(key, abort.signal), client().transitions(key, abort.signal)])
+      ;[head, transitions] = await Promise.all([client().issueHeader(form.key, abort.signal), client().transitions(form.key, abort.signal)])
     } catch (e) {
       const message = e && e.message ? e.message : String(e)
-      postReply(page, { type: 'loadError', key, message: cut(oneLine(message), 400) })
+      form.loadError = cut(oneLine(message), 400)
+      form.loading = null
+      syncForm(form)
       return { ok: false, error: message }
+    } finally {
+      if (forms.get(form.key) !== form) forms.set(form.key, form)
     }
+    form.loading = null
     const h = header(head.key, head.fields)
-    page.status = h.status
-    page.tone = wr.toneOf(h.category)
-    page.transitions = transitions
-    page.loaded = true
+    form.status = h.status
+    form.tone = wr.toneOf(h.category)
+    form.transitions = transitions
+    form.loaded = true
+    form.loadError = ''
     let asked = ''
-    let n = null
-    let form = null
-    if (fill) {
-      let transitionId = ''
-      if (fill.status) {
-        const m = wr.matchStatus(transitions, fill.status)
-        if (m.transition) transitionId = m.transition.id
-        else asked = wr.statusProblem(m, fill.status, transitions)
-      }
-      n = ++page.seq
-      form = { comment: fill.comment || '', transitionId, marker: fill.marker || '', asked: asked ? `Asked to move: ${asked}` : '', n }
-    } else {
-      page.form.transitionId = keepChoice(transitions, page.form.transitionId)
-    }
-    const acked = n !== null ? waitFor(page, n) : null
-    if (n !== null) page.fillPending = n
-    postReply(page, {
-      type: 'issue',
-      key,
-      summary: h.summary,
-      status: h.status,
-      tone: wr.toneOf(h.category),
-      url: browseUrl(cfg().site, key),
-      transitions: pageTransitions(transitions),
-      toolbar: page.toolbar,
-      max: wr.MAX_COMMENT,
-      ...(form ? { fill: form } : { keep: page.form.transitionId }),
-    })
     let applied = true
-    if (acked) {
-      // A page that never answers (it did not load) took nothing the person could have edited.
-      const ack = await settleWithin(acked, draftWaitMs, { applied: true, late: true })
-      applied = !(ack && ack.applied === false)
-      // No answer in time: no longer pending, but not taken as drawn either (review R2-3): only the
-      // page's own answer, however late, moves the revision a click is bound to.
-      if (ack && ack.late) {
-        if (page.fillPending === n) page.fillPending = null
-        // Nor are its fields taken as the page's (review R3): the person may have typed meanwhile
-        // and the page kept their words. The form stays as the page last reported it; the late
-        // answer (`filled`) reconciles it.
-        page.lateFill = { n, comment: form.comment, transitionId: form.transitionId }
-      } else if (applied) page.form = { comment: form.comment, transitionId: form.transitionId }
-      else page.edited = true
-    }
-    updateButton(page)
+    if (fill) {
+      if (form.v !== v0 || form.busy) applied = false
+      else {
+        let transitionId = ''
+        if (fill.status) {
+          const m = wr.matchStatus(transitions, fill.status)
+          if (m.transition) transitionId = m.transition.id
+          else asked = wr.statusProblem(m, fill.status, transitions)
+        }
+        Object.assign(form, { comment: fill.comment || '', transitionId, marker: fill.marker || '', asked: asked ? `Asked to move: ${asked}` : '', edited: false, note: null })
+        form.v++
+      }
+    } else form.transitionId = keepChoice(transitions, form.transitionId)
+    syncForm(form)
     return { ok: true, applied, asked }
   }
 
-  /** The page drew fill `n` (or kept the person's words over it): the revision a click is bound to. */
-  function filled(page, n, applied) {
-    if (page.fillPending === n) page.fillPending = null
-    if (applied && n > page.shownRev) page.shownRev = n
-    const late = page.lateFill
-    if (late && late.n === n) {
-      // The answer to a fill the host stopped waiting for: only now is it known what the page shows.
-      // Taken over only when no newer fill went out since; refused means the person's words stay.
-      page.lateFill = null
-      if (!applied) page.edited = true
-      else if (n === page.seq) page.form = { comment: late.comment, transitionId: late.transitionId }
-      updateButton(page)
-    }
+  /** A copy typed or chose: the form takes it (last write wins) and the other copies follow. */
+  function editForm(win, m, from) {
+    if (!mayReply(from)) return
+    const form = formOf(win.key)
+    if (form.busy) return
+    form.comment = typeof m.comment === 'string' ? m.comment.slice(0, FORM_TEXT_MAX) : ''
+    form.transitionId = typeof m.transitionId === 'string' ? m.transitionId.slice(0, 200) : ''
+    form.edited = true
+    form.note = null
+    form.v++
+    syncForm(form, from.copy)
   }
 
   const DRAFT_CHANGED = 'The draft just changed: read it again and click once more. Nothing was written.'
 
-  /** A promise for the page's answer number `n` (`filled`, `values`); null when the page closes first. */
-  function waitFor(page, n) {
-    return new Promise((resolve) => page.waiting.set(n, resolve))
-  }
-  function answer(page, n, value) {
-    const w = page.waiting.get(n)
-    if (!w) return false
-    page.waiting.delete(n)
-    w(value)
-    return true
-  }
-
   /**
-   * The reply page of `key`: focused when it is open (a Reply click), else opened. With `draft`
-   * (`ccc jira update` in draft mode: `{ comment, status, marker }`) an open page the person has
-   * not touched gets the draft instead of its content; one they edited (or are posting) is left
-   * alone and the draft refused (wr.draftDecision). Resolves `{ decision, load }`, `load` the
-   * page's read of the issue (loadReply); throws when the plugin is not set up, writing is off, or
-   * the app refused the overlay.
+   * Post: what the clicking copy holds, which must be the form (its own edits came first on its port; anything
+   * else in between is a draft or another copy's words it had not seen). Then the comment and the move
+   * (lib/write.js performWrite: the transitions read again first; a move that is gone or a status that changed
+   * writes nothing). The values are checked as input: a comment within the limit, a transition id we listed and
+   * that is enabled. A read guest is refused by `from.access`, whatever its page drew.
    */
-  async function openReply(key, draft) {
-    await ready
-    if (!S.settings.ready) throw notConfigured()
-    if (!writesOn()) throw new Error(wr.OFF_MESSAGE)
-    const existing = replies.get(key) || null
-    if (existing && !draft) {
-      existing.handle.focus()
-      return { decision: 'focus', load: existing.loading }
+  async function postForm(win, m, from) {
+    if (!writer(from)) {
+      if (from && typeof from.copy === 'string') noteTo(win, from, 'Only the owner or a guest with write access can post.')
+      return
     }
-    if (draft) {
-      const d = wr.draftDecision(existing)
-      if (d === 'refuse') return { decision: 'refuse' }
-      if (d === 'replace') {
-        existing.handle.focus()
-        existing.loading = loadReply(existing, draft)
-        return { decision: 'replace', load: existing.loading }
-      }
-    }
-    const row = rowOf(key)
-    const summary = row && row.issue.summary ? `: ${cut(oneLine(row.issue.summary), 70)}` : ''
-    // Open first, read after (`ready: 'manual'`): the page drops its loader once it drew the issue.
-    // No `type`: a reply page is no issue overlay, so no item buttons or Discuss land on it.
-    const handle = ctx.overlay.start({
-      kind: 'html',
-      file: 'panels/reply.html',
-      title: `Reply to ${key}${summary}`,
-      size: 'default',
-      ready: 'manual',
-      discuss: false,
-      buttons: [{ id: 'send', label: 'Post comment', primary: true, disabled: true }],
-    })
-    const page = {
-      key,
-      handle,
-      // An app with overlay toolbar buttons gets the one button there (the style guide: an overlay has
-      // one action bar, the app's); an older one, the page's own.
-      toolbar: typeof handle.onButton === 'function' && typeof handle.setButtons === 'function',
-      form: { comment: '', transitionId: '' },
-      transitions: [],
-      status: '',
-      tone: 'neutral',
-      loaded: false,
-      edited: false,
-      busy: false,
-      closed: false,
-      seq: 0,
-      waiting: new Map(),
-      button: null,
-      loading: null,
-      // Review R1-1: the fill (draft) number the page last said it drew, and one posted but not yet
-      // acknowledged. A click is bound to what the page showed: a submission must carry `shownRev`,
-      // and none is taken while a fill is on its way.
-      shownRev: 0,
-      fillPending: null,
-      lateFill: null,
-    }
-    replies.set(key, page)
-    const end = () => {
-      page.closed = true
-      if (replies.get(key) === page) replies.delete(key)
-      for (const w of page.waiting.values()) w(null)
-      page.waiting.clear()
-    }
-    handle.result.then(end, end)
-    if (page.toolbar) handle.onButton('send', (from) => sendFromToolbar(page, from))
-    handle.onMessage((m, from) => onReplyMessage(page, m, from))
-    page.loading = loadReply(page, draft || { comment: '', status: null, marker: '' })
-    const refused = await overlayRefusal(handle)
-    if (refused) {
-      end()
-      throw new Error(`Cannot open the reply page: ${refused.message}`)
-    }
-    return { decision: 'open', load: page.loading }
-  }
-
-  function onReplyMessage(page, m, from) {
-    if (!m || typeof m !== 'object' || page.closed) return
-    switch (m.type) {
-      case 'edit':
-        // The person typed or chose: from now on a draft from ccc never replaces this page.
-        page.edited = true
-        page.form = { comment: typeof m.comment === 'string' ? m.comment : '', transitionId: typeof m.transitionId === 'string' ? m.transitionId : '' }
-        return updateButton(page)
-      case 'filled':
-        if (!Number.isInteger(m.n)) return
-        filled(page, m.n, m.applied !== false)
-        answer(page, m.n, { applied: m.applied !== false })
-        return
-      case 'values':
-        if (Number.isInteger(m.n)) answer(page, m.n, m)
-        return
-      case 'submit':
-        // The page's own button, only on an app without toolbar buttons (else the toolbar is the one button).
-        if (!page.toolbar) return void send(page, m, from)
-        return
-      case 'browser':
-        return void openBrowser(page.key).catch((e) => setNotice(e.message, 'error'))
-      case 'reload':
-        if (!page.busy) page.loading = loadReply(page, page.loaded ? null : { comment: page.form.comment, status: null, marker: '' })
-        return
-    }
-  }
-
-  /**
-   * The toolbar's button: the click is the decision, so what is written is what the page holds at
-   * that moment, asked from the page (its `edit` messages could still be on the way), not the last
-   * copy the host saw. A page that does not answer writes nothing.
-   */
-  async function sendFromToolbar(page, from) {
-    if (!wr.mayWrite(from)) return postReply(page, { type: 'error', message: 'Only the owner or a guest with write access can post.' })
-    if (page.busy) return
-    // A draft on its way to the page may already be drawn there while the person read the old one.
-    if (page.fillPending !== null) return postReply(page, { type: 'error', message: DRAFT_CHANGED })
-    // Locked while the page answers: a draft arriving now is refused (wr.draftDecision), so it cannot
-    // land between the click and the values.
-    page.busy = true
-    let values
-    try {
-      const n = ++page.seq
-      const got = waitFor(page, n)
-      postReply(page, { type: 'collect', n })
-      values = await settleWithin(got, PAGE_ANSWER_MS, null)
-    } finally {
-      // Every release of the lock redraws the button (review R2-4): a load that finished meanwhile drew
-      // it busy, and a refusal below returns without drawing it again.
-      page.busy = false
-      updateButton(page)
-    }
-    if (!values) return postReply(page, { type: 'error', message: 'The page did not answer; nothing was written. Try again.' })
-    // No await from here into send's own lock: nothing can slip in between.
-    return send(page, values, from)
-  }
-
-  /**
-   * Write what the page holds: the comment, then the move (lib/write.js performWrite: the
-   * transitions read again first; a move that is gone or a status that changed writes nothing).
-   * The values come from our own page, but are checked as input: a comment within the limit, a
-   * transition id we listed and that is enabled.
-   */
-  async function send(page, values, from) {
-    if (page.busy || page.closed) return
-    const fail = (message) => postReply(page, { type: 'error', message: cut(oneLine(message), 600) })
-    if (!wr.mayWrite(from)) return fail('Only the owner or a guest with write access can post.')
+    const fail = (text) => noteTo(win, from, text)
     if (!writesOn()) return fail(`Not posted: ${wr.OFF_MESSAGE}.`)
-    if (!page.loaded) return fail(`${page.key} is not read yet; nothing was written.`)
-    if (page.fillPending !== null || values.rev !== page.shownRev) return fail(DRAFT_CHANGED)
-    const rawComment = typeof values.comment === 'string' ? values.comment : ''
-    const transitionId = typeof values.transitionId === 'string' ? values.transitionId : ''
+    const form = forms.get(win.key)
+    if (!form || form.busy) return
+    if (!form.loaded) return fail(`${win.key} is not read yet; nothing was written.`)
+    const rawComment = typeof m.comment === 'string' ? m.comment : ''
+    const transitionId = typeof m.transitionId === 'string' ? m.transitionId : ''
+    if (rawComment !== form.comment || transitionId !== form.transitionId) return fail(DRAFT_CHANGED)
     let comment = ''
     if (rawComment.trim()) {
       const c = wr.checkComment(rawComment)
       if (c.error) return fail(`Not posted: ${c.error}.`)
       comment = c.text
     }
-    if (transitionId && !page.transitions.some((t) => t.id === transitionId && t.enabled)) return fail('That move is not in the list any more; choose again. Nothing was written.')
+    if (transitionId && !form.transitions.some((t) => t.id === transitionId && t.enabled)) return fail('That move is not in the list any more; choose again. Nothing was written.')
     if (!comment && !transitionId) return fail('Nothing to post: write a comment or choose a status.')
-    page.busy = true
-    updateButton(page)
-    postReply(page, { type: 'busy', on: true })
+    form.busy = true
+    form.note = { kind: 'info', text: 'Writing to Jira…' }
+    syncForm(form)
     try {
-      const r = await wr.performWrite({ client: client(), key: page.key, comment, transitionId, expectStatus: transitionId ? page.status : undefined, guard: writeGuard(null), signal: abort.signal })
+      const r = await wr.performWrite({ client: client(), key: form.key, comment, transitionId, expectStatus: transitionId ? form.status : undefined, guard: writeGuard(null), signal: abort.signal })
       if (r.moved) {
-        page.transitions = r.transitions || page.transitions
+        form.transitions = r.transitions || form.transitions
         if (r.status !== undefined) {
-          page.status = r.status
-          page.tone = wr.toneOf(r.category)
+          form.status = r.status
+          form.tone = wr.toneOf(r.category)
         }
-        page.form.transitionId = keepChoice(page.transitions, transitionId)
-        postReply(page, { type: 'transitions', status: page.status, tone: page.tone, transitions: pageTransitions(page.transitions), keep: page.form.transitionId, message: r.error })
+        form.transitionId = keepChoice(form.transitions, transitionId)
+        form.note = { kind: 'error', text: r.error || 'The issue changed meanwhile; nothing was written. Choose again.' }
         return
       }
-      if (!r.steps.length) return fail(r.error || 'Nothing was written.')
+      if (!r.steps.length) {
+        form.note = { kind: 'error', text: cut(oneLine(r.error || 'Nothing was written.'), 600) }
+        return
+      }
       const commentPosted = r.steps.some((x) => x.step === 'comment' && x.ok)
-      if (r.steps.some((x) => x.ok)) await afterWrite(page.key)
-      const lines = wr.stepLines(page.key, r.steps)
+      if (r.steps.some((x) => x.ok)) await afterWrite(form.key)
+      const lines = wr.stepLines(form.key, r.steps)
       if (r.ok) {
         setNotice(lines.join('. ') + '.')
-        page.busy = false
-        closeQuietly(page.handle)
+        // Done: the form starts over (the window stays, now showing the new comment and status).
+        Object.assign(form, { comment: '', transitionId: '', marker: '', asked: '', edited: false, note: { kind: 'info', text: lines.join('. ') + '.', steps: r.steps } })
+        form.v++
+        if (!win.ended) void loadWindow(win).catch(() => {})
+        if (!form.loading) form.loading = loadForm(form, null)
         return
       }
-      // Partial or failed: each step says how it went; a posted comment leaves the box (it is in
-      // Jira now), the status choice stays for a retry, against a fresh list.
-      if (commentPosted) page.form.comment = ''
+      // Partial or failed: each step says how it went; a posted comment leaves the box (it is in Jira now), the
+      // status choice stays for a retry, against a fresh list.
+      if (commentPosted) form.comment = ''
       if (r.steps.some((x) => x.ok)) {
         try {
-          const [head, list] = await Promise.all([client().issueHeader(page.key, abort.signal), client().transitions(page.key, abort.signal)])
+          const [head, list] = await Promise.all([client().issueHeader(form.key, abort.signal), client().transitions(form.key, abort.signal)])
           const fresh = header(head.key, head.fields)
-          page.status = fresh.status
-          page.tone = wr.toneOf(fresh.category)
-          page.transitions = list
+          form.status = fresh.status
+          form.tone = wr.toneOf(fresh.category)
+          form.transitions = list
         } catch (e) {
-          ctx.log.warn(`re-reading ${page.key} after a partial write: ${e && e.message ? e.message : e}`)
+          ctx.log.warn(`re-reading ${form.key} after a partial write: ${e && e.message ? e.message : e}`)
         }
       }
-      page.form.transitionId = keepChoice(page.transitions, transitionId)
-      postReply(page, { type: 'result', steps: r.steps, lines, clearComment: commentPosted, status: page.status, tone: page.tone, transitions: pageTransitions(page.transitions), keep: page.form.transitionId })
+      form.transitionId = keepChoice(form.transitions, transitionId)
+      form.note = { kind: 'error', text: lines.join('\n'), steps: r.steps }
+      if (commentPosted) form.v++
     } catch (e) {
-      fail(e && e.message ? e.message : String(e))
+      form.note = { kind: 'error', text: cut(oneLine(e && e.message ? e.message : String(e)), 600) }
     } finally {
-      page.busy = false
-      postReply(page, { type: 'busy', on: false })
-      updateButton(page)
+      form.busy = false
+      if (forms.get(form.key) !== form) forms.set(form.key, form)
+      syncForm(form)
     }
+  }
+
+  /**
+   * `ccc jira update` in draft mode: the issue's window with Reply selected and the form filled, unless a copy typed
+   * in it or a Post is under way (wr.draftDecision: their words are never replaced). `{ decision, load }`.
+   */
+  async function draftReply(key, draft) {
+    await ready
+    if (!S.settings.ready) throw notConfigured()
+    if (!writesOn()) throw new Error(wr.OFF_MESSAGE)
+    const existing = forms.get(key) || null
+    const decision = wr.draftDecision(existing)
+    if (decision === 'refuse') return { decision }
+    const form = formOf(key)
+    const load = loadForm(form, draft)
+    form.loading = load
+    await showWindow(key, { reply: true })
+    return { decision, load }
   }
 
   /**
@@ -1334,7 +1173,7 @@ function start(ctx, io = {}) {
 
   /**
    * `ccc jira update` once cli.js parsed and checked it: the setting read again here (a change since
-   * cli.js asked counts), then the draft page or the direct write. `{ code, text }`.
+   * cli.js asked counts), then the draft in the issue's window or the direct write. `{ code, text }`.
    */
   async function cliUpdate(key, o) {
     const mode = cfg().writes
@@ -1342,16 +1181,16 @@ function start(ctx, io = {}) {
     if (mode === 'draft') {
       let tab = null
       if (o.tabId) tab = (await ctx.sessions.list().catch(() => [])).find((t) => t && t.tabId === o.tabId) || null
-      const r = await openReply(key, { comment: o.comment || '', status: o.status || null, marker: wr.draftMarker(o.tabId, tab) })
-      const editing = `The person is editing a reply to ${key}: their page was left alone and this draft was not opened. Nothing was written.`
+      const r = await draftReply(key, { comment: o.comment || '', status: o.status || null, marker: wr.draftMarker(o.tabId, tab) })
+      const editing = `The person is editing a reply to ${key}: their words were left alone and this draft was not opened. Nothing was written.`
       if (r.decision === 'refuse') return { code: 1, text: editing }
       const loaded = await settleWithin(r.load, draftWaitMs, { ok: true, late: true })
       if (loaded && loaded.applied === false) return { code: 1, text: editing }
       const lines = [`Draft opened for ${key}: the person posts it.`]
       if (loaded && loaded.asked) lines.push(`The status was left at Keep status: ${loaded.asked}`)
-      if (loaded && loaded.error) lines.push(`The page could not read ${key} from Jira: ${oneLine(loaded.error)}`)
-      if (loaded && loaded.late) lines.push('The page is still reading the issue.')
-      lines.push('Nothing was written: the person decides on the page. Do not run this again to post it.')
+      if (loaded && loaded.error) lines.push(`Could not read ${key} from Jira: ${oneLine(loaded.error)}`)
+      if (loaded && loaded.late) lines.push('The window is still reading the issue.')
+      lines.push('Nothing was written: the person decides in the Reply tab. Do not run this again to post it.')
       return { code: 0, text: lines.join('\n') }
     }
     // direct: the client and the settings it was asked under, taken before the first await and kept
@@ -1498,12 +1337,31 @@ function start(ctx, io = {}) {
     }
   }
 
+  /**
+   * `openIssue(key, { reply? })` for another plugin (Gmail's Open issue): the window as a row click opens
+   * it, resolved once it is up (`{ opened: true }`), not when the issue is read. The caller is another
+   * plugin acting on the person's click; the app's overlay limits (open windows, opens a minute) apply.
+   */
+  async function serviceOpenIssue(rawKey, opts, who) {
+    const key = svc.checkKey(rawKey)
+    const reply = Boolean(opts && typeof opts === 'object' && opts.reply === true)
+    try {
+      await showWindow(key, { reply })
+      return { opened: true }
+    } catch (e) {
+      ctx.log.info(`jira service: openIssue ${key} for ${who}: ${e && e.message ? e.message : e}`)
+      throw svc.serviceError(e)
+    }
+  }
+
   if (typeof ctx.services.provide === 'function') {
     ctx.services.provide('jira', {
       site: () => serviceSite(),
       // The caller is read before the first await (it names who a refusal in the log was for).
       issue: (key, opts) => serviceIssue(key, opts, caller()),
       document: (key, opts) => serviceDocument(key, opts, caller()),
+      // v2 (0.9.0): the issue's window, as a click on a row opens it; `reply` selects the Reply tab.
+      openIssue: (key, opts) => serviceOpenIssue(key, opts, caller()),
     })
   }
 
@@ -1586,18 +1444,13 @@ function start(ctx, io = {}) {
   })
 
   /**
-   * `act(id, 'open')` of the feed: resolves once the open has started (the reviewer's overlay
-   * prepared, or our own reader page up), not when it is over; with neither (a reviewer without
-   * prepare, or a prepare that failed) once the issue is shown, so a failed read is still the act's
-   * refusal. The rest (reading the issue, the
-   * annotate, and without the reviewer the wait for our reader page to close) runs on: Inbox gives
-   * every act 10 s, and an open that waited for all that was reported as failed while it was on
-   * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
-   * after the start goes to this panel's notice; one before it is the act's refusal.
-   * An open that ends without anything shown (the reviewer refused the issue, the app refused our
-   * reader page: paths that set the panel's notice and return) is a refusal too, with that notice's
-   * text: resolving there answered ok for nothing on screen, and Inbox ended the item's "back" mark
-   * (phase-1 review round 3). One guard here, not one per early return.
+   * `act(id, 'open')` of the feed: resolves once the issue's window is up (the app did not refuse it),
+   * not when the issue is read: Inbox gives every act 10 s, and an open that waited for the read was
+   * reported as failed while it was on screen (design-next §3.4: "a source answering act(id, 'open') by
+   * opening first"). A failed read after that is the window's error page and this panel's notice; a
+   * refusal before it is the act's refusal. An open that ends without anything shown is a refusal too,
+   * with the panel notice's text: resolving there answered ok for nothing on screen, and Inbox ended the
+   * item's "back" mark (phase-1 review round 3). One guard here, not one per early return.
    */
   function openStarted(open) {
     return new Promise((resolve, reject) => {
@@ -1670,7 +1523,6 @@ function start(ctx, io = {}) {
       laneErrors: S.laneErrors,
       deferred: S.stats ? S.stats.deferred : 0,
       triage: { on: tOn, error: tOn ? S.triageError : null },
-      annotate: annotateOn(),
       // The rows' Reply button (0.8.0): not offered when the writes setting is off.
       writes: S.settings.ready && writesOn(),
       notice: S.notice,
@@ -1794,7 +1646,8 @@ function start(ctx, io = {}) {
         case 'reply':
           // `from` is the app's word on who clicked: a read guest never writes, whatever the page drew.
           if (!mayWriteOrNotice(from)) return
-          return void (await openReply(key))
+          if (!writesOn()) return setNotice(wr.OFF_MESSAGE, 'error')
+          return void (await showWindow(key, { reply: true }))
       }
     } catch (e) {
       ctx.log.warn(`panel ${m.type} ${key || ''}: ${e && e.message ? e.message : e}`)
@@ -1803,6 +1656,14 @@ function start(ctx, io = {}) {
   })
 
   // ---- CLI ----
+
+  /** What opening an issue shows on this app (for `ccc jira status`). */
+  function windowStatus() {
+    const o = ctx.overlay || {}
+    if (typeof ctx.notes === 'function') return 'the issue window: notes, Ask and Reply in every view'
+    if (typeof o.start !== 'function') return 'no overlays on this app'
+    return 'the issue window, without notes and Ask (they need cc-cockpit 0.28.0)'
+  }
 
   function status() {
     const st = S.settings
@@ -1822,11 +1683,7 @@ function start(ctx, io = {}) {
       writes: c.writes,
       counts: S.lists ? S.view.lanes.map((l) => ({ title: l.title, total: l.rows.length, unread: l.id === 'done' ? 0 : l.rows.filter((r) => r.unread).length })) : null,
       triage: triageOn() ? (S.triageError ? `error: ${S.triageError}` : 'on (bronos.jev-triage)') : 'off: install and enable Jev triage (bronos.jev-triage) to sort the lanes',
-      annotate: annotateOn()
-        ? S.htmlRejected
-          ? `reviewer.annotate, text only (its html mode needs cc-cockpit 0.8.0: ${S.htmlRejected})`
-          : 'reviewer.annotate (the issue as HTML with its images, notes on it)'
-        : 'the plugin\'s reader page (reviewer.annotate needs cc-cockpit 0.8.0)',
+      window: windowStatus(),
       deferred: S.stats ? S.stats.deferred : 0,
       error: S.error,
       laneErrors: S.laneErrors,

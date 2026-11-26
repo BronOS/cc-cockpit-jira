@@ -36,7 +36,7 @@ const ready = {
   ready: true, missing: [], problems: [], site: 'https://acme.atlassian.net', email: 'me@example.com', tokenSet: true, mode: 'scoped',
   account: { accountId: 'abc', displayName: 'Oleg' }, lastPoll: Date.parse('2026-11-02T11:57:00Z'), pollMinutes: 3,
   counts: [{ title: 'Backlog', total: 2, unread: 1 }, { title: 'In progress', total: 1, unread: 0 }],
-  triage: 'on (bronos.jev-triage)', annotate: 'plain reader', deferred: 0, error: null, laneErrors: { mentioned: 'boom' }, issueErrors: [],
+  triage: 'on (bronos.jev-triage)', window: 'the issue window', deferred: 0, error: null, laneErrors: { mentioned: 'boom' }, issueErrors: [],
 }
 
 test('status when configured: site and token kind, account, counts, triage, errors', async () => {
@@ -46,7 +46,7 @@ test('status when configured: site and token kind, account, counts, triage, erro
   assert.match(r.stdout, /lanes +Backlog 2 \(1 unread\) · In progress 1/)
   assert.match(r.stdout, /triage +on/)
   assert.match(r.stdout, /error +mentioned: boom/)
-  assert.match((await runCli(['status'], deps({ ...ready, writes: 'draft' }))).stdout, /writes +draft: ccc jira update opens the reply page; the person posts it/)
+  assert.match((await runCli(['status'], deps({ ...ready, writes: 'draft' }))).stdout, /writes +draft: ccc jira update fills Reply in the issue window; the person posts it/)
 })
 
 test('keys are checked before anything runs', async () => {

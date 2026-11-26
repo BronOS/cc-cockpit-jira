@@ -87,8 +87,9 @@ test('a new draft never replaces what the person edited or is posting', () => {
   assert.equal(wr.draftDecision({ edited: false, busy: true }), 'refuse')
 })
 
-test('who may write: the owner or a write guest; an app with no `from` has no guests', () => {
-  assert.equal(wr.mayWrite(undefined), true)
+test('who may write: the owner or a write guest; a missing `from` refuses (0.9.0 needs an app that says who)', () => {
+  assert.equal(wr.mayWrite(undefined), false)
+  assert.equal(wr.mayWrite(null), false)
   assert.equal(wr.mayWrite({ view: 'desktop', access: 'owner' }), true)
   assert.equal(wr.mayWrite({ view: 'web:2', access: 'write', person: 'Ann' }), true)
   assert.equal(wr.mayWrite({ view: 'web:3', access: 'read' }), false)

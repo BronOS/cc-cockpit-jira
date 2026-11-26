@@ -1,6 +1,6 @@
 'use strict'
 // Small decisions behind the row actions, kept pure for the suites: which Claude tab Discuss
-// goes to, how the browser is opened, and whether the reviewer lacks `annotate`.
+// goes to and how the browser is opened.
 
 /**
  * The tab for Discuss (design "Discuss with Claude"): the one the person is looking at
@@ -46,14 +46,4 @@ function openerArgv(platform, url) {
   return ['xdg-open', url]
 }
 
-/**
- * Whether a reviewer call failed because the installed reviewer has no `annotate` (cc-cockpit
- * before 0.8.0). The app's message is `service "reviewer" (plugin P) has no method "annotate"`
- * (`ccc guide api`); anything else is a real failure of annotate.
- */
-function isMissingAnnotate(err) {
-  const m = err && err.message ? err.message : String(err || '')
-  return /has no method "annotate"/.test(m)
-}
-
-module.exports = { pickTab, tabLabel, openerArgv, isMissingAnnotate }
+module.exports = { pickTab, tabLabel, openerArgv }

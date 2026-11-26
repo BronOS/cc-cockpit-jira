@@ -5,11 +5,11 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const host = require('../dist/host')
 const svc = require('../dist/lib/service')
-const { fakeJira, fakeCtx, fakeTriage, fixture, picture, SITE, TOKEN, ME, NOW, CONFIGURED } = require('./fakes')
+const { fakeJira, fakeCtx, fakeTriage, fixture, picture, SITE, TOKEN, ME, NOW, CONFIGURED, kitView, until, OWNER } = require('./fakes')
 
 function boot(opts = {}) {
   const jira = fakeJira(opts.jira)
-  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: fakeTriage(), reviewer: opts.reviewer })
+  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: fakeTriage() })
   let t = NOW
   const clock = opts.clock || { now: () => t, advance: (ms) => (t += ms) }
   const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => clock.now(), setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs })
@@ -86,9 +86,9 @@ test('the TTL cache is bounded, oldest out', () => {
 
 // ---- the host ----
 
-test('the host provides jira with site, issue and document', () => {
+test('the host provides jira with site, issue, document and openIssue (v2)', () => {
   const { ctx, h } = boot()
-  assert.deepEqual(Object.keys(ctx.provided.jira).sort(), ['document', 'issue', 'site'])
+  assert.deepEqual(Object.keys(ctx.provided.jira).sort(), ['document', 'issue', 'openIssue', 'site'])
   return h.stop()
 })
 
@@ -273,4 +273,26 @@ test('document(): one at a time, a short queue; the rest are refused', async () 
   assert.equal(refused.length, 2)
   assert.match(refused[0].reason.message, /^jira: busy \(issue documents: 1 at a time, 3 waiting\)/)
   await h.stop()
+})
+
+test('openIssue(key, { reply }) (v2): the issue window, focused when open; Reply only when asked and writes are on', async () => {
+  const { ctx, call, h } = boot()
+  await h.pollNow('test')
+  assert.deepEqual(await call('openIssue', 'abc-1'), { opened: true })
+  const o = ctx.overlays[0]
+  assert.equal(o.spec.file, 'panels/issue.html')
+  o.connect(OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  assert.ok(!kitView(o, 'c-owner').own.some((m) => m.type === 'select'), 'no Reply unless asked')
+  assert.deepEqual(await call('openIssue', 'ABC-1', { reply: true }), { opened: true })
+  assert.equal(ctx.overlays.length, 1)
+  assert.equal(o.focused, 1)
+  await until(() => kitView(o, 'c-owner').own.some((m) => m.type === 'select' && m.tab === 'reply'))
+  // { reply: 'yes' } is not true: no Reply.
+  await assert.rejects(call('openIssue', 'nope'), /jira: not an issue key/)
+  await h.stop()
+  const off = boot({ project: {} })
+  await assert.rejects(off.call('openIssue', 'ABC-1'), /not configured/)
+  assert.equal(off.ctx.overlays.length, 0)
+  await off.h.stop()
 })
