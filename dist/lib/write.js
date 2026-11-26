@@ -1,6 +1,7 @@
 'use strict'
 // Writing to Jira (0.8.0, design "Writing to Jira"): the pure parts. The client (lib/client.js)
-// sends; the host (dist/host.js) wires these to the reply page and `ccc jira update`.
+// sends; the host (dist/host.js) wires these to the issue window's Reply tab and
+// `ccc jira update`.
 //
 // Why so little: a comment and a status change, nothing else (Left out: fields, assignee, mentions,
 // restricted comments, a transition's own fields). Issue text reaches Claude (Discuss, `ccc jira
@@ -160,9 +161,9 @@ function updatePlan(mode, { comment, status }) {
 }
 
 /**
- * A new draft (`ccc jira update` in draft mode) for an issue whose reply page may be open:
- * 'open' (none is), 'replace' (open, the person has not touched it), or 'refuse' (they edited it,
- * or are posting it: their words are never overwritten by a draft).
+ * A new draft (`ccc jira update` in draft mode) for an issue whose Reply form (host.js `forms`) may
+ * exist: 'open' (none does), 'replace' (it does, nobody typed in it), or 'refuse' (a copy edited it,
+ * or a Post is under way: their words are never overwritten by a draft).
  */
 function draftDecision(page) {
   if (!page) return 'open'
@@ -172,12 +173,11 @@ function draftDecision(page) {
 
 /**
  * Whether a click or a page message may write: the owner, or a write guest. `from` is the app's
- * word (the connection main bound, never the page). An app too old to send `from` has no guests at
- * all, so a missing `from` is the owner; a `from` without a known access is refused.
+ * word (the connection main bound, never the page). Fail closed (0.9.0): a missing `from` refuses,
+ * as does one without a known access; 0.9.0 needs an app that sends it (overlays in every view).
  */
 function mayWrite(from) {
-  if (from === undefined || from === null) return true
-  return typeof from === 'object' && (from.access === 'owner' || from.access === 'write')
+  return Boolean(from) && typeof from === 'object' && (from.access === 'owner' || from.access === 'write')
 }
 
 /** Jira's `{ key, fields }` header (client.issueHeader) as `{ status, category }`. */

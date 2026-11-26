@@ -3,71 +3,60 @@
   <head>
     <meta charset="utf-8" />
     <title>Jira issue</title>
-    <!-- The plugin's reader: used when the bundled reviewer has no annotate (cc-cockpit before
-      0.8.0) or no reviewer is enabled. The issue as HTML the host built by escaping every Jira
-      text (dist/lib/adfhtml.js), its images as data: URLs (the page CSP allows data: images),
-      and three buttons; the host does the rest. -->
+    <!-- The issue window (0.9.0, layout A): the issue on the left (the overlay kit's renderer: an inert parse,
+      an allow-list walk, fresh elements; never innerHTML), the note for Claude and the notes under it, and a side
+      column with Ask (core's chat) and Reply (the host keeps the form). The host (dist/host.js) greets each copy
+      with the access the app gave it; a read guest's copy has no side column. The kit is vendored and pinned
+      (vendor/cc-kit, test/kit-pin.test.js). The CSP runs no inline script: the logic is in replylogic.js and
+      issue.js. -->
+    <link rel="stylesheet" href="../vendor/cc-kit/dist/cc-kit.css" />
     <script src="/__sdk/panel.js"></script>
+    <script src="../vendor/cc-kit/dist/cc-kit.js"></script>
+    <script src="replylogic.js" defer></script>
     <script src="issue.js" defer></script>
     <style>
-      body { margin: 0; padding: 0 16px 16px; font: 13px/1.55 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
-      header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 1; background: var(--cc-bg); padding: 8px 0; border-bottom: 1px solid var(--cc-border); margin-bottom: 12px; }
-      header .grow { flex: 1; }
+      html, body { height: 100%; }
+      body { margin: 0; font: 13px/1.55 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      #app { display: flex; height: 100%; }
+      #main { flex: 1; min-width: 0; overflow-y: auto; padding: 8px 16px 16px; }
+      #side { width: 340px; flex: none; border-left: 1px solid var(--cc-border); display: flex; flex-direction: column; min-height: 0; }
+      #side[hidden] { display: none; }
+      #side .cc-kit-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      #side .cc-kit-tabbody { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; }
+      @media (max-width: 700px) { #app { flex-direction: column; } #side { width: auto; border-left: none; border-top: 1px solid var(--cc-border); } }
+      .muted { color: var(--cc-fg-muted); }
       button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
       button:hover { border-color: var(--cc-border-strong); }
-      button:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 1px; }
-      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); }
-      .muted { color: var(--cc-fg-muted); }
-      #doc { max-width: 920px; }
-      a { color: var(--cc-accent); }
-      h1 { font-size: 18px; margin: 0 0 6px; }
-      h2 { font-size: 15px; margin: 18px 0 8px; }
-      h3, h4, h5, h6 { font-size: 13.5px; margin: 14px 0 6px; }
-      pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, monospace; background: var(--cc-surface-1); padding: 8px 10px; border-radius: 6px; }
-      code { font-family: ui-monospace, monospace; font-size: 12px; background: var(--cc-surface-1); padding: 0 3px; border-radius: 3px; }
-      pre code { background: none; padding: 0; }
-      blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--cc-border-strong); color: var(--cc-fg-muted); }
-      table { border-collapse: collapse; margin: 8px 0; }
-      th, td { border: 1px solid var(--cc-border); padding: 4px 8px; text-align: left; vertical-align: top; }
-      th { background: var(--cc-surface-1); }
-      img { max-width: 100%; height: auto; border-radius: 4px; border: 1px solid var(--cc-border); }
-      img:not([src]) { display: none; }
-      figure { margin: 8px 0; }
-      figcaption { color: var(--cc-fg-muted); font-size: 12px; }
-      details { margin: 8px 0; }
-      summary { cursor: pointer; font-weight: 600; }
-      .card { border: 1px solid var(--cc-border); border-radius: 6px; padding: 8px 12px; margin: 8px 0; background: var(--cc-surface-1); }
-      .card.new { border-color: var(--cc-accent); box-shadow: inset 3px 0 0 var(--cc-accent); }
-      .card-header { color: var(--cc-fg-muted); font-size: 12px; margin-bottom: 4px; }
-      .meta { color: var(--cc-fg-muted); font-size: 12px; }
-      .lozenge { display: inline-block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; padding: 0 5px; border-radius: 3px; background: var(--cc-surface-3); color: var(--cc-fg); }
-      .lozenge-info { background: color-mix(in srgb, #3b82f6 22%, transparent); color: color-mix(in srgb, #3b82f6 70%, var(--cc-fg)); }
-      .lozenge-success { background: color-mix(in srgb, #22c55e 22%, transparent); color: color-mix(in srgb, #22c55e 70%, var(--cc-fg)); }
-      .lozenge-warning { background: color-mix(in srgb, #f59e0b 24%, transparent); color: color-mix(in srgb, #f59e0b 70%, var(--cc-fg)); }
-      .lozenge-danger { background: color-mix(in srgb, #ef4444 24%, transparent); color: color-mix(in srgb, #ef4444 70%, var(--cc-fg)); }
-      dl.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, max-content)); gap: 4px 24px; margin: 6px 0; }
-      dl.facts dt { grid-row: 1; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--cc-fg-muted); }
-      dl.facts dd { grid-row: 2; margin: 0; }
-      .person { font-weight: 600; padding: 0 6px; border-radius: 3px; background: var(--cc-surface-2); }
-      .card.new .card-header .lozenge { background: var(--cc-accent); color: var(--cc-accent-fg); }
-      .mention { background: var(--cc-accent-soft); border-radius: 8px; padding: 0 4px; }
-      .jira-panel { border-radius: 6px; padding: 4px 12px; margin: 8px 0; border-left: 4px solid var(--cc-status-working); background: var(--cc-surface-1); }
-      .jira-panel-note { border-left-color: var(--cc-project-purple); }
-      .jira-panel-warning { border-left-color: var(--cc-status-needs-permission); }
-      .jira-panel-error { border-left-color: var(--cc-status-ended); background: var(--cc-bg-error); }
-      .jira-panel-success { border-left-color: var(--cc-status-waiting); }
-      li > p { margin: 2px 0; }
-      .attachment-list { padding-left: 18px; }
-      .attachment-list li { margin: 4px 0; }
+      button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 1px; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); font-weight: 600; }
+      button:disabled { opacity: 0.55; cursor: default; }
+      button.link { border: 0; background: none; padding: 0; color: var(--cc-accent); text-decoration: underline; }
+      /* Reply (0.8.0's reply page, folded in as a side tab). Who drafted it: a framed line with a bold word, not a colour alone. */
+      .marker { margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--cc-border-strong); border-left: 3px solid var(--cc-accent); border-radius: 4px; background: var(--cc-surface-1); }
+      .marker strong { font-weight: 700; }
+      .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+      .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+      .field label { font-weight: 600; }
+      select { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 6px; max-width: 100%; }
+      textarea.reply { font: 13px/1.5 system-ui, sans-serif; color: inherit; background: var(--cc-bg-input, var(--cc-bg)); border: 1px solid var(--cc-border); border-radius: 4px; padding: 6px 8px; min-height: 160px; resize: vertical; box-sizing: border-box; width: 100%; }
+      @media (pointer: coarse) { textarea.reply, select { font-size: 16px; } }
+      .help { color: var(--cc-fg-muted); font-size: 12px; }
+      .count.over { color: var(--cc-status-ended); font-weight: 600; }
+      .line { padding: 6px 10px; border-radius: 4px; margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--cc-border); }
+      .line.error { background: var(--cc-bg-error); }
+      .line.error::before { content: "⚠ "; font-weight: 700; }
+      .line.info { background: var(--cc-bg-banner, var(--cc-surface-1)); }
+      ul.steps { list-style: none; margin: 0 0 10px; padding: 0; }
+      ul.steps li { padding: 2px 0; }
+      /* A step's outcome is a word and a mark, not only a colour. */
+      ul.steps .mark { display: inline-block; width: 1.4em; font-weight: 700; }
+      .actions { display: flex; justify-content: flex-end; }
     </style>
   </head>
   <body>
-    <header>
-      <span class="muted grow">Notes on the issue need cc-cockpit 0.8.0 (the reviewer's annotate).</span>
-      <button id="discuss" type="button" class="primary" title="Send the issue to the Claude tab you are looking at">Discuss</button>
-      <button id="new" type="button" title="Open a new Claude tab about this issue">New session</button>
-      <button id="browser" type="button" title="Open in the browser">↗</button>
-    </header>
-    <div id="doc"><p class="muted">Loading…</p></div>
+    <div id="app">
+      <div id="main"><p class="muted">Loading…</p></div>
+      <div id="side" hidden></div>
+    </div>
   </body>
 </html>

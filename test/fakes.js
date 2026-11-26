@@ -124,14 +124,15 @@ const CONFIGURED = { site: SITE, email: EMAIL, apiToken: TOKEN }
 
 /**
  * A ctx good enough for dist/host.js: in-memory storage, recorded posts, badges, sessions, exec,
- * overlays; services `triage` and `reviewer` from `opts`.
+ * perView overlays (fakeOverlay), notes, announcements and parts (not with `opts.oldApp`); the service
+ * `triage` from `opts`.
  */
 function fakeCtx(opts = {}) {
   const store = new Map()
   const panelListeners = []
   const settingsListeners = []
   const dataDir = opts.dataDir || tmpDir()
-  const services = { triage: opts.triage || null, reviewer: opts.reviewer || null }
+  const services = { triage: opts.triage || null }
   const ctx = {
     api: 1,
     pluginId: 'bronos.jira',
@@ -196,43 +197,23 @@ function fakeCtx(opts = {}) {
       for (const fn of panelListeners) await fn(m, from)
     },
     overlay: {
-      start(spec) {
-        const o = { spec, posts: [], listeners: [], answer: opts.overlayAnswer || { kind: 'dismissed' } }
-        ctx.overlays.push(o)
-        // `opts.overlayWait`: the result waits for the test (o.close(answer)), so it can talk to the page first.
-        let close
-        const result = opts.overlayWait ? new Promise((r) => (close = r)) : Promise.resolve(o.answer)
-        o.close = (answer) => close && close(answer || { kind: 'dismissed' })
-        o.send = (m, from) => o.listeners.forEach((fn) => fn(structuredClone(m), from))
-        // The toolbar (opts.noToolbar: an app without overlay buttons): `o.click(id, from)` is a
-        // click on one of the opener's buttons, `o.buttons` what setButtons last gave.
-        o.buttons = spec.buttons || []
-        o.buttonHandlers = {}
-        o.click = (id, from) => o.buttonHandlers[id](from)
-        const toolbar = opts.noToolbar
-          ? {}
-          : {
-              onButton: (id, fn) => ((o.buttonHandlers[id] = fn), () => {}),
-              setButtons: (b) => (o.buttons = structuredClone(b)),
-            }
-        return {
-          ...toolbar,
-          result,
-          post: (m) => {
-            if (JSON.stringify(m).length > 1040384) throw new Error('overlay message over 1,040,384 chars of JSON')
-            o.posts.push(structuredClone(m))
-            // `opts.page(o, m)`: a fake page answering the host's posts (the reply page's acks).
-            if (opts.page) queueMicrotask(() => opts.page(o, structuredClone(m)))
-          },
-          onMessage: (fn) => (o.listeners.push(fn), () => {}),
-          onDiscuss: (fn) => ((o.discuss = fn), () => {}),
-          close() {
-            o.closed = true
-            if (close) close({ kind: 'dismissed' })
-          },
-          focus() {},
-        }
+      start: (spec) => fakeOverlay(ctx, opts, spec, ctx.overlays),
+    },
+    // App-wide plugin storage (the kit keeps the owner's last side tab there).
+    appStore: new Map(),
+    appStorage: {
+      async get(k) {
+        return ctx.appStore.has(k) ? structuredClone(ctx.appStore.get(k)) : undefined
       },
+      async set(k, v) {
+        ctx.appStore.set(k, structuredClone(v))
+      },
+    },
+    parts: [],
+    announceListeners: [],
+    /** Another plugin's overlay announces (`handle.announce`): every listener of that kind hears it. */
+    announce(a) {
+      for (const l of ctx.announceListeners) if (l.kind === a.kind) l.fn(structuredClone(a))
     },
     sessions: {
       async list() {
@@ -273,7 +254,7 @@ function fakeCtx(opts = {}) {
         })
       },
       available: (name) => Boolean(services[name]),
-      // A newer app's pick for a used name (ctx.services.provider); tests that need another reviewer replace it.
+      // A newer app's pick for a used name (ctx.services.provider).
       provider: (name) => (services[name] ? `cockpit.${name}` : null),
       // What the host provides, called the way another plugin's handle would: arguments and results
       // structured-cloned, `caller()` set to `as` for the call.
@@ -309,8 +290,117 @@ function fakeCtx(opts = {}) {
   }
   // `opts.buttons`: an app with ctx.overlay.buttons (the inbox redesign); without it, as before.
   if (opts.buttons) ctx.overlay.buttons = (name, provider) => (ctx.buttonProviders.push({ name, provider }), () => {})
+  // App 0.28.0 (the overlay foundation): notes, Ask, announcements and parts. `opts.oldApp` (0.27.0) has none.
+  if (!opts.oldApp) {
+    ctx.notes = () => ({})
+    ctx.overlay.onAnnounce = (kind, fn) => (ctx.announceListeners.push({ kind, fn }), () => {})
+    ctx.overlay.part = (overlayId, spec) => {
+      if (opts.partRefuse) throw new Error(opts.partRefuse)
+      return fakeOverlay(ctx, opts, { ...spec, partOf: overlayId }, ctx.parts)
+    }
+  }
   return ctx
 }
+
+/**
+ * An overlay as `ctx.overlay.start` (or `part`) gives it to a perView plugin (docs/design-overlay-views.md):
+ * copies connect with the app's `from` (`o.connect(from)`, `from.copy` set), `post(m, { copy })` reaches one
+ * copy (recorded in `o.posts` as `{ copy, message }`; a copy that is gone is dropped), `o.send(m, from)` is a
+ * page's post. The result waits for `o.close()` (Esc). `opts.noPerView`: an app before overlays in every view
+ * (no onConnect); `opts.oldApp`: 0.27.0 (no onAsk, no announce); `opts.overlayRefuse`: main refuses it.
+ */
+function fakeOverlay(ctx, opts, spec, list) {
+  const o = { spec, posts: [], listeners: [], connects: [], disconnects: [], copies: new Map(), buttonHandlers: {}, buttons: spec.buttons || [], closed: false, focused: 0 }
+  list.push(o)
+  let close = null
+  const result = opts.overlayRefuse ? Promise.reject(new Error(opts.overlayRefuse)) : new Promise((r) => (close = r))
+  result.catch(() => {})
+  o.close = (answer) => {
+    o.closed = true
+    for (const f of [...o.copies.values()]) o.disconnect(f)
+    if (close) close(answer || { kind: 'dismissed' })
+  }
+  o.connect = (from) => {
+    o.copies.set(from.copy, from)
+    for (const fn of [...o.connects]) fn(structuredClone(from))
+  }
+  o.disconnect = (from) => {
+    o.copies.delete(from.copy)
+    for (const fn of [...o.disconnects]) fn(structuredClone(from))
+  }
+  o.send = (m, from) => o.listeners.forEach((fn) => fn(structuredClone(m), from === undefined ? undefined : structuredClone(from)))
+  o.sent = (copy) => o.posts.filter((p) => p.copy === copy).map((p) => p.message)
+  o.click = (id, from) => o.buttonHandlers[id](from)
+  const handle = {
+    result,
+    post(message, options) {
+      if (JSON.stringify(message).length > 1040384) throw new RangeError('overlay message over 1,040,384 chars of JSON')
+      if (o.closed) return
+      const copy = options && options.copy
+      if (copy !== undefined && !o.copies.has(copy)) return
+      o.posts.push({ copy, message: structuredClone(message) })
+    },
+    onMessage: (fn) => (o.listeners.push(fn), () => o.listeners.splice(o.listeners.indexOf(fn) >>> 0, 1)),
+    onButton: (id, fn) => ((o.buttonHandlers[id] = fn), () => {}),
+    setButtons: (b) => (o.buttons = structuredClone(b)),
+    onDiscuss: (fn) => ((o.discuss = fn), () => {}),
+    close() {
+      o.close()
+    },
+    focus() {
+      o.focused++
+    },
+  }
+  if (!opts.noPerView) {
+    handle.onConnect = (fn) => {
+      o.connects.push(fn)
+      for (const f of o.copies.values()) fn(structuredClone(f))
+      return () => {}
+    }
+    handle.onDisconnect = (fn) => (o.disconnects.push(fn), () => {})
+    handle.hide = () => {}
+    handle.addSources = () => {}
+  }
+  if (!opts.oldApp && !opts.noPerView) {
+    handle.onAsk = (fn) => ((o.ask = fn), () => {})
+    handle.announce = (a) => (o.announced = a)
+  }
+  return handle
+}
+
+/**
+ * What one copy of a kit page holds after the host's posts: `init` (access, tab), the last `state` (chunks
+ * joined), `phase` ('loading' | 'failed' | 'ready'), the last `failed`, and the page's own messages in order.
+ */
+function kitView(o, copy) {
+  const v = { init: null, state: undefined, phase: null, failed: null, own: [] }
+  let chunks = null
+  for (const m of o.sent(copy)) {
+    if (m.type === 'cc-kit.init') v.init = m
+    else if (m.type === 'cc-kit.loading') v.phase = 'loading'
+    else if (m.type === 'cc-kit.failed') (v.phase = 'failed'), (v.failed = m)
+    else if (m.type === 'cc-kit.state') (v.phase = 'ready'), (v.state = m.state)
+    else if (m.type === 'cc-kit.chunk') {
+      if (m.i === 0) chunks = []
+      chunks.push(m.text)
+      if (chunks.length === m.n) (v.phase = 'ready'), (v.state = JSON.parse(chunks.join('')))
+    } else v.own.push(m)
+  }
+  return v
+}
+
+/** Waits until `fn()` is true (the host's work is async: the kit greets after a storage read). */
+async function until(fn, ms = 3000) {
+  const end = Date.now() + ms
+  while (!fn()) {
+    if (Date.now() > end) throw new Error('timed out waiting')
+    await new Promise((r) => setTimeout(r, 2))
+  }
+}
+
+const OWNER = { view: 'desktop', access: 'owner', copy: 'c-owner' }
+const WRITER = { view: 'web:3', access: 'write', person: 'Bob', copy: 'c-write' }
+const READER = { view: 'web:2', access: 'read', person: 'Ann', copy: 'c-read' }
 
 /** A fake triage service: priority by lane unless a hint decides; records every call. */
 function fakeTriage() {
@@ -351,4 +441,4 @@ function picture(type = 'png', size = 64) {
   return Buffer.concat([head, Buffer.alloc(Math.max(0, size - head.length), 7)])
 }
 
-module.exports = { fakeJira, fakeCtx, fakeTriage, fixture, tmpDir, picture, SITE, GATEWAY, MEDIA, EMAIL, TOKEN, ME, NOW, CONFIGURED, TRANSITIONS }
+module.exports = { fakeJira, fakeCtx, fakeOverlay, kitView, until, fakeTriage, fixture, tmpDir, picture, SITE, GATEWAY, MEDIA, EMAIL, TOKEN, ME, NOW, CONFIGURED, TRANSITIONS, OWNER, WRITER, READER }

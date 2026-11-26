@@ -70,7 +70,10 @@ test('the manifest schema follows the app\'s rules: no regex, a top-level secret
   assert.ok(!('default' in token))
   assert.deepEqual(Object.keys(token).sort(), ['description', 'format', 'title', 'type'])
   for (const [k, p] of Object.entries(schema.properties)) if (p.oneOf) assert.ok('default' in p, `${k} has a default`)
-  assert.deepEqual(manifest.services, { provides: { jira: 1, 'inbox-feed': 2 }, uses: { triage: 1, reviewer: 1 } })
+  assert.deepEqual(manifest.services, { provides: { jira: 1, 'inbox-feed': 2 }, uses: { triage: 1 } })
+  // 0.9.0: an overlay per view (notes, Ask, the Reply form per copy) and guests handled (read guests get no Reply).
+  assert.deepEqual(manifest.overlays, { perView: true })
+  assert.deepEqual(manifest.guests, { aware: true })
   // stdin only with stdinDash (0.8.0, `update ... -`): without it every subcommand would wait on an open pipe.
   assert.equal(manifest.contributes.cli[0].stdin, true)
   assert.equal(manifest.contributes.cli[0].stdinDash, true)

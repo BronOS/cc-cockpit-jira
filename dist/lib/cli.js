@@ -24,7 +24,7 @@ const HELP = `ccc jira: your Jira issues (bronos.jira)
   ccc jira help              this text
 
 update follows the project's setting "What ccc jira update does" (writes):
-  draft (default)  opens the reply page filled in and writes NOTHING: the person reads it, edits it
+  draft (default)  fills Reply in the issue window and writes NOTHING: the person reads it, edits it
                    and posts it, or not. The answer comes at once. This is the person's decision:
                    do not run the command again to make it happen, and do not try another way.
   direct           writes: the comment first, then the move; each step is reported.
@@ -168,7 +168,7 @@ function statusText(st, now = Date.now()) {
   lines.push(`last poll ${st.lastPoll ? `${stamp(st.lastPoll)} (${ago(st.lastPoll, now)})` : 'none yet'}${st.polling ? ', polling now' : ''}; every ${st.pollMinutes} min while this project is open`)
   lines.push(`lanes     ${countsLine(st)}`)
   lines.push(`triage    ${st.triage}`)
-  lines.push(`annotate  ${st.annotate}`)
+  lines.push(`opens in  ${st.window}`)
   if (st.writes) lines.push(`writes    ${WRITES_TEXT[st.writes] || st.writes}`)
   if (st.deferred) lines.push(`pending   ${st.deferred} issues still to read in full (next polls)`)
   for (const p of st.problems) lines.push(`problem   ${p}`)
@@ -180,7 +180,7 @@ function statusText(st, now = Date.now()) {
 
 // `ccc jira status`'s line for the writes setting: what `update` does now.
 const WRITES_TEXT = {
-  draft: 'draft: ccc jira update opens the reply page; the person posts it',
+  draft: 'draft: ccc jira update fills Reply in the issue window; the person posts it',
   direct: 'direct: ccc jira update writes the comment and the move itself',
   off: 'off: read-only, ccc jira update is refused and the panel offers no Reply',
 }

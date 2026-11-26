@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jira issue</title>
+    <!-- A part (0.9.0, D13): the issue a Gmail mail or a calendar event names, drawn by this plugin beside that
+      window's page in its own frame (the other plugin never sees it). Compact and read-only: no writes in a part;
+      Open issue (the owner's copy) opens the issue's own window. -->
+    <link rel="stylesheet" href="../vendor/cc-kit/dist/cc-kit.css" />
+    <script src="/__sdk/panel.js"></script>
+    <script src="../vendor/cc-kit/dist/cc-kit.js"></script>
+    <script src="part.js" defer></script>
+    <style>
+      body { margin: 0; padding: 10px 12px; font: 13px/1.5 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      h1 { font-size: 14px; margin: 0 0 6px; overflow-wrap: anywhere; }
+      .key { font-family: ui-monospace, monospace; color: var(--cc-fg-muted); }
+      .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+      .lozenge { display: inline-block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; padding: 0 5px; border-radius: 3px; background: var(--cc-surface-3); color: var(--cc-fg); }
+      .lozenge-info { background: color-mix(in srgb, #3b82f6 22%, transparent); }
+      .lozenge-success { background: color-mix(in srgb, #22c55e 22%, transparent); }
+      .muted { color: var(--cc-fg-muted); }
+      button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); font-weight: 600; }
+      button.link { border: 0; background: none; padding: 0; color: var(--cc-accent); text-decoration: underline; }
+      .actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+    </style>
+  </head>
+  <body>
+    <div id="part"><p class="muted">Loading…</p></div>
+  </body>
+</html>

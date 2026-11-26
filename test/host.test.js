@@ -1,16 +1,16 @@
 'use strict'
 // The host end to end with a fake ctx and a fake Jira: polling, triage, the panel actions, the
-// annotate fallback, the CLI.
+// issue window (0.9.0), the CLI.
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const host = require('../dist/host')
-const { fakeJira, fakeCtx, fakeTriage, fixture, picture, SITE, MEDIA, NOW, CONFIGURED } = require('./fakes')
+const { fakeJira, fakeCtx, fakeTriage, fixture, picture, kitView, until, SITE, MEDIA, NOW, CONFIGURED, OWNER, WRITER, READER } = require('./fakes')
 
 function boot(opts = {}) {
   const jira = fakeJira(opts.jira)
-  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer, sessions: opts.sessions, overlayAnswer: opts.overlayAnswer, overlayWait: opts.overlayWait, buttons: !opts.noButtons })
+  const ctx = fakeCtx({ project: opts.project === undefined ? CONFIGURED : opts.project, triage: opts.triage === undefined ? fakeTriage() : opts.triage, sessions: opts.sessions, buttons: !opts.noButtons, oldApp: opts.oldApp, noPerView: opts.noPerView, overlayRefuse: opts.overlayRefuse })
   if (opts.header) Object.assign(ctx.panels, opts.header)
-  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs })
+  const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: jira.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, platform: 'linux', cliWaitMs: 2000, imageWaitMs: opts.imageWaitMs, overlaySettleMs: 10 })
   return { jira, ctx, h, triage: ctx.services && opts.triage === undefined ? null : opts.triage }
 }
 const lane = (st, id) => st.lanes.find((l) => l.id === id)
@@ -131,51 +131,80 @@ function abc1WithAttachments() {
 }
 const attJira = (extra = {}) => ({ issues: { 'ABC-1': abc1WithAttachments() }, attachments: { 10001: picture('png', 300) }, ...extra })
 
-test('Open with the html reviewer (0.8.0): styled HTML, the image as an asset, the active tab; with markReadOnOpen it marks read', async () => {
-  const calls = []
-  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
-  const { ctx, h, jira } = boot({ reviewer, project: { ...CONFIGURED, markReadOnOpen: true }, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })], jira: attJira() })
+// ---- the issue window (0.9.0): one perView overlay per issue, drawn by the kit ----
+
+/** Opens ABC-1 from the panel and connects the given copies; resolves the window's fake overlay. */
+async function openWindow(ctx, key = 'ABC-1', ...copies) {
+  await ctx.sendPanel({ type: 'open', key })
+  const o = ctx.overlays.filter((x) => x.spec.file === 'panels/issue.html').at(-1)
+  for (const c of copies) o.connect(c)
+  return o
+}
+
+test('Open: the window starts at once (type, notes key, Open in Jira), then every copy gets the issue with its image', async () => {
+  const { ctx, h, jira } = boot({ jira: attJira() })
   await h.pollNow('test')
-  await ctx.runCli(['unread', 'ABC-1'])
-  assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, true)
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(calls.length, 1)
-  const c = calls[0]
-  assert.equal(c.title, 'ABC-1: Checkout fails for EU cards')
-  assert.equal(c.url, `${SITE}/browse/ABC-1`)
-  assert.equal(c.key, 'jira:ABC-1')
-  assert.equal(c.tabId, 't2')
-  assert.equal(c.text, undefined, 'html mode sends no text')
-  assert.match(c.html, /^<div class="card"><h1>ABC-1: Checkout fails for EU cards<\/h1>/)
-  assert.match(c.html, /<div class="card new"><div class="card-header"><strong>Ann Smith<\/strong>/)
-  assert.match(c.html, /<img data-asset="att10001" alt="shot.png"/)
-  assert.match(c.html, new RegExp(`<a href="${SITE}/rest/api/3/attachment/content/10002">trace\\.log</a>`))
-  assert.deepEqual(c.assets.map((a) => [a.id, a.name, a.mime]), [['att10001', 'shot.png', 'image/png']])
-  assert.match(c.assets[0].dataUrl, /^data:image\/png;base64,iVBORw0KGgo/)
+  const reads = () => jira.calls.filter((x) => /\/issue\/ABC-1/.test(x.url)).length
+  const before = reads()
+  let readsAtStart = -1
+  const start = ctx.overlay.start
+  ctx.overlay.start = (spec) => ((readsAtStart = reads() - before), start(spec))
+  const o = await openWindow(ctx, 'ABC-1', OWNER, READER)
+  assert.equal(readsAtStart, 0, 'the window was asked for before the issue was read')
+  assert.equal(o.spec.file, 'panels/issue.html')
+  assert.equal(o.spec.title, 'ABC-1: Checkout fails for EU cards')
+  assert.deepEqual(o.spec.type, { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } })
+  assert.deepEqual(o.spec.notes, { key: 'jira:ABC-1' })
+  assert.deepEqual(o.spec.buttons.map((b) => b.id), ['browser'])
+  assert.equal(o.spec.ready, undefined, 'the kit page shows its own loading state')
+  await until(() => kitView(o, 'c-owner').phase === 'ready' && kitView(o, 'c-read').phase === 'ready')
+  const s = kitView(o, 'c-owner').state
+  assert.equal(s.key, 'ABC-1')
+  assert.equal(s.url, `${SITE}/browse/ABC-1`)
+  // Layout A: the key facts as pills under the h1, the rest folded under More details.
+  assert.match(s.html, /^<div class="card"><h1>ABC-1: Checkout fails for EU cards<\/h1>\n<dl class="facts">/)
+  assert.match(s.html, /<details><summary>More details<\/summary><dl class="facts">/)
+  assert.match(s.html, /<img data-asset="att10001" alt="shot.png"/)
+  assert.deepEqual(s.assets.map((a) => [a.id, a.mime]), [['att10001', 'image/png']])
+  assert.equal(s.reply, true, "the owner's copy has Reply")
+  assert.equal(kitView(o, 'c-read').state.reply, false, "a read guest's copy has none")
+  assert.equal(kitView(o, 'c-owner').init.access, 'owner')
+  assert.equal(kitView(o, 'c-read').init.access, 'read')
+  // Every post names a copy: never a broadcast.
+  assert.ok(o.posts.every((p) => typeof p.copy === 'string'))
   // The media host got the signed address without the token.
   const media = jira.calls.filter((x) => x.url.startsWith(MEDIA))
   assert.equal(media.length, 1)
   assert.equal(media[0].auth, undefined)
-  assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, false)
-  assert.equal(ctx.overlays.length, 0)
-  // The second open takes the image from the cache: no new download.
+  // A second open focuses the same window.
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(jira.calls.filter((x) => x.url.startsWith(MEDIA)).length, 1)
-  assert.equal(calls[1].assets.length, 1)
-  assert.match((await ctx.runCli(['status'])).stdout, /HTML with its images/)
+  assert.equal(ctx.overlays.length, 1)
+  assert.equal(o.focused, 1)
+  assert.match((await ctx.runCli(['status'])).stdout, /opens in +the issue window: notes, Ask and Reply/)
+  await h.stop()
+})
+
+test('Open with markReadOnOpen: marked read once an owner copy has the issue; a guest looking is not the person', async () => {
+  const { ctx, h } = boot({ project: { ...CONFIGURED, markReadOnOpen: true } })
+  await h.pollNow('test')
+  await ctx.runCli(['unread', 'ABC-1'])
+  const unread = () => lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread
+  const o = await openWindow(ctx, 'ABC-1', READER)
+  await until(() => kitView(o, 'c-read').phase === 'ready')
+  assert.equal(unread(), true, 'only a read guest saw it')
+  o.connect(OWNER)
+  await until(() => !unread())
   await h.stop()
 })
 
 // The person's request: opening an issue to glance at it must not clear its unread mark unless they ask for that.
 test('Open with markReadOnOpen off (the default): the issue stays unread; Read still marks it read', async () => {
-  const calls = []
-  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
-  const { ctx, h } = boot({ reviewer })
+  const { ctx, h } = boot()
   await h.pollNow('test')
   await ctx.runCli(['unread', 'ABC-1'])
   const marks = JSON.stringify(h.S.seen)
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(calls.length, 1, 'the issue was shown')
+  const o = await openWindow(ctx, 'ABC-1', OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
   assert.equal(lane(ctx.lastState(), 'inProgress').rows.find((r) => r.key === 'ABC-1').unread, true)
   assert.equal(JSON.stringify(h.S.seen), marks, 'the open left the seen marks (and the Mark unread flag) as they were')
   await ctx.sendPanel({ type: 'read', key: 'ABC-1' })
@@ -183,142 +212,124 @@ test('Open with markReadOnOpen off (the default): the issue stays unread; Read s
   await h.stop()
 })
 
-// Real-work feedback 8: the overlay came only after the issue was read.
-test('Open with a reviewer that has prepare: the overlay is up before the issue is read, then filled', async () => {
-  const order = []
-  let reads = () => 0
-  const reviewer = {
-    prepare: async (spec) => (order.push(['prepare', spec, reads()]), { opened: true }),
-    cancel: async (spec) => (order.push(['cancel', spec.key]), { closed: false }),
-    annotate: async (spec) => (order.push(['annotate', spec.key]), { opened: true }),
-  }
-  const { ctx, h, jira } = boot({ reviewer, jira: attJira() })
-  await h.pollNow('test')
-  reads = () => jira.calls.filter((x) => /\/issue\/ABC-1|attachment/.test(x.url)).length
-  const before = reads()
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.deepEqual(order[0], ['prepare', { key: 'jira:ABC-1', title: 'ABC-1: Checkout fails for EU cards', type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } } }, before])
-  assert.ok(reads() > before, 'the open read the issue, after prepare')
-  assert.deepEqual(order.slice(1), [['annotate', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
-  await h.stop()
-})
-
-test('Open with prepare: an open that fails cancels the loading overlay', async () => {
-  const calls = []
-  const reviewer = {
-    prepare: async (spec) => (calls.push(['prepare', spec.key]), { opened: true }),
-    cancel: async (spec) => (calls.push(['cancel', spec.key]), { closed: true }),
-    annotate: async () => {
-      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
-    },
-  }
-  const { ctx, h } = boot({ reviewer, jira: attJira() })
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.deepEqual(calls, [['prepare', 'jira:ABC-1'], ['cancel', 'jira:ABC-1']])
-  assert.match(ctx.lastState().notice.text, /could not open ABC-1/)
-  await h.stop()
-})
-
-test('a slow image does not hold the open: after the wait it is a link, and the open goes on', async () => {
-  const calls = []
-  const reviewer = { annotate: async (spec) => (calls.push(spec), {}) }
-  const { ctx, h } = boot({ reviewer, jira: attJira({ mediaDelay: 400 }), imageWaitMs: 30 })
+test('a slow image does not hold the open: after the wait it is a link', async () => {
+  const { ctx, h } = boot({ jira: attJira({ mediaDelay: 400 }), imageWaitMs: 30 })
   await h.pollNow('test')
   const t0 = Date.now()
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  const o = await openWindow(ctx, 'ABC-1', OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
   assert.ok(Date.now() - t0 < 350, 'the open did not wait for the image')
-  assert.equal(calls[0].assets, undefined)
-  assert.match(calls[0].html, new RegExp(`<a href="${SITE}/rest/api/3/attachment/content/10001">shot\\.png</a>`))
+  const s = kitView(o, 'c-owner').state
+  assert.deepEqual(s.assets, [])
+  assert.match(s.html, new RegExp(`<a href="${SITE}/rest/api/3/attachment/content/10001">shot\\.png</a>`))
   await h.stop()
 })
 
-test('a reviewer whose annotate takes text only: html refused, then text; remembered for the run', async () => {
-  const calls = []
-  const reviewer = {
-    annotate: async (spec) => {
-      calls.push(spec)
-      if (typeof spec.text !== 'string') throw new Error('annotate: text must be a string')
-      return {}
-    },
-  }
-  const { ctx, h } = boot({ reviewer, jira: attJira() })
-  await h.pollNow('test')
-  await ctx.runCli(['unread', 'ABC-1'])
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(calls.length, 2)
-  assert.ok(calls[0].html)
-  assert.match(calls[1].text, /^ABC-1: Checkout fails for EU cards/)
-  assert.match(calls[1].text, /\[new\] Ann Smith/)
-  assert.equal(calls[1].html, undefined)
-  assert.equal(calls[1].key, 'jira:ABC-1')
-  assert.equal(ctx.lastState().notice, null)
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(calls.length, 3, 'the next open goes straight to text')
-  assert.equal(typeof calls[2].text, 'string')
-  assert.match((await ctx.runCli(['status'])).stdout, /text only/)
-  await h.stop()
-})
-
-test('a real annotate failure (html and text both refused) is shown, and html is tried again next time', async () => {
-  let n = 0
-  const reviewer = { annotate: async () => { n++; throw new Error('annotate: the overlay could not open') } }
-  const { ctx, h } = boot({ reviewer })
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(n, 2)
-  assert.equal(ctx.overlays.length, 0)
-  assert.match(ctx.lastState().notice.text, /could not open/)
-  assert.equal(h.S.htmlRejected, null)
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(n, 4)
-  await h.stop()
-})
-
-test('Open on an app without annotate: our own page gets the same HTML and the image; a link opens in the browser', async () => {
-  const reviewer = { review: async () => {} } // the 0.7.0 reviewer: no annotate
-  const { ctx, h } = boot({ reviewer, jira: attJira(), overlayWait: true })
-  await h.pollNow('test')
-  const opening = ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  // The issue is posted once the page counts as up (no refusal within OVERLAY_SETTLE_MS).
-  for (let i = 0; i < 300 && !(ctx.overlays.length && ctx.overlays[0].posts.length); i++) await new Promise((r) => setTimeout(r, 5))
-  const o = ctx.overlays[0]
-  assert.equal(o.spec.file, 'panels/issue.html')
-  const head = o.posts[0]
-  assert.equal(head.type, 'doc')
-  assert.equal(head.key, 'ABC-1')
-  const html = o.posts.filter((m) => m.type === 'html').map((m) => m.part).join('')
-  assert.equal(o.posts.filter((m) => m.type === 'html').length, head.parts)
-  assert.match(html, /<img data-asset="att10001"/)
-  const asset = o.posts.find((m) => m.type === 'asset')
-  assert.equal(asset.id, 'att10001')
-  assert.match(asset.dataUrl, /^data:image\/png;base64,/)
-  // A link in the page: http(s) goes to xdg-open as one argument, anything else is not opened.
-  o.send({ open: 'https://grafana.example.com/d/x' })
-  o.send({ open: 'file:///etc/passwd' })
-  await new Promise((r) => setTimeout(r, 5))
-  assert.deepEqual(ctx.execs.map((e) => e.argv), [['xdg-open', 'https://grafana.example.com/d/x']])
-  assert.match(ctx.lastState().notice.text, /Only web links/)
-  o.close({ kind: 'value', value: { action: 'newSession' } })
-  await opening
-  assert.equal(ctx.opened.length, 1)
-  assert.match(ctx.opened[0].prompt, /^About Jira ABC-1: Checkout fails for EU cards\n/)
-  assert.equal(ctx.opened[0].focus, true, 'the new tab is shown')
-  assert.equal(ctx.lastState().annotate, false)
-  await h.stop()
-})
-
-test('Open with no reviewer at all also uses the page; a big issue arrives in parts under the message limit', async () => {
+test('a big issue reaches each copy in chunks under the page message limit', async () => {
   const raw = fixture('issue-ABC-1.json')
   raw.fields.comment.comments.push({ id: '300', author: { displayName: 'Ann Smith', accountId: 'a' }, created: '2026-11-01T11:00:00.000+0100', body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: '"quoted" \\ '.repeat(50000) }] }] } })
-  const { ctx, h } = boot({ reviewer: null, jira: { issues: { 'ABC-1': raw } } })
+  const { ctx, h } = boot({ jira: { issues: { 'ABC-1': raw } } })
+  await h.pollNow('test')
+  const o = await openWindow(ctx, 'ABC-1', OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  assert.ok(o.sent('c-owner').filter((m) => m.type === 'cc-kit.chunk').length >= 2)
+  for (const p of o.posts) assert.ok(JSON.stringify(p.message).length <= 1040384)
+  assert.match(kitView(o, 'c-owner').state.html, /&quot;quoted&quot;/)
+  await h.stop()
+})
+
+test('a failed read: the owner gets the error with Try again, a guest the fixed text; Try again reads again', async () => {
+  const fail = { 'ABC-1': 500 }
+  const { ctx, h } = boot({ jira: { fail } })
+  await h.pollNow('test')
+  // Nothing cached to fall back on for this key's full read: drop the cached copy.
+  h.S.cache.issues['ABC-1'] = undefined
+  const o = await openWindow(ctx, 'ABC-1', OWNER, WRITER)
+  await until(() => kitView(o, 'c-owner').phase === 'failed')
+  assert.equal(o.closed, false, 'the window stays, with the error')
+  assert.match(kitView(o, 'c-owner').failed.message, /^Could not load the issue: /)
+  assert.equal(kitView(o, 'c-owner').failed.retry, true)
+  assert.deepEqual(kitView(o, 'c-write').failed, { type: 'cc-kit.failed', message: 'This issue could not be loaded.', retry: false })
+  assert.equal(ctx.lastState().notice.kind, 'error')
+  delete fail['ABC-1']
+  o.send({ type: 'cc-kit.retry' }, WRITER)
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(kitView(o, 'c-owner').phase, 'failed', "a guest's Try again does nothing")
+  o.send({ type: 'cc-kit.retry' }, OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  await h.stop()
+})
+
+test('links: the document\'s own open in the clicking view; Open in Jira too; any other is not opened', async () => {
+  const { ctx, h } = boot({ jira: attJira() })
+  const opened = []
+  ctx.openExternal = async (url, o) => opened.push([url, o])
+  await h.pollNow('test')
+  const o = await openWindow(ctx, 'ABC-1', OWNER, READER)
+  await until(() => kitView(o, 'c-read').phase === 'ready')
+  o.send({ type: 'cc-kit.link', url: `${SITE}/rest/api/3/attachment/content/10002` }, READER)
+  o.send({ type: 'cc-kit.link', url: 'https://evil.example/x' }, OWNER)
+  await o.click('browser', READER)
+  await new Promise((r) => setTimeout(r, 10))
+  assert.deepEqual(opened.sort((a, b) => a[0].localeCompare(b[0])), [
+    [`${SITE}/browse/ABC-1`, { view: 'web:2' }],
+    [`${SITE}/rest/api/3/attachment/content/10002`, { view: 'web:2' }],
+  ])
+  await h.stop()
+})
+
+test('Discuss and Ask: the issue as text; Ask refuses a read guest and a missing from', async () => {
+  const { ctx, h } = boot()
+  await h.pollNow('test')
+  const o = await openWindow(ctx, 'ABC-1', OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  const d = await o.discuss(OWNER)
+  assert.match(d.text, /^About Jira ABC-1: Checkout fails for EU cards\n/)
+  assert.match((await o.ask(OWNER)).text, /^ABC-1: Checkout fails for EU cards\nType: Bug/)
+  assert.ok(await o.ask(WRITER))
+  assert.equal(await o.ask(READER), null)
+  assert.equal(await o.ask(undefined), null)
+  await h.stop()
+})
+
+test('on an old app (ctx without notes, ask, onAnnounce) the page opens and Discuss works', async () => {
+  const { ctx, h } = boot({ oldApp: true })
+  await h.pollNow('test')
+  assert.equal(typeof ctx.notes, 'undefined')
+  assert.equal(typeof ctx.overlay.onAnnounce, 'undefined')
+  const o = await openWindow(ctx, 'ABC-1', OWNER)
+  assert.equal(o.ask, undefined, 'no onAsk on this app')
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
+  assert.match(kitView(o, 'c-owner').state.html, /ABC-1: Checkout fails for EU cards/)
+  assert.match((await o.discuss(OWNER)).text, /^About Jira ABC-1: /)
+  assert.match((await ctx.runCli(['status'])).stdout, /without notes and Ask \(they need cc-cockpit 0\.28\.0\)/)
+  await h.stop()
+})
+
+test('an app before overlays in every view (no onConnect): fail closed, nothing shown, the panel says why', async () => {
+  const { ctx, h } = boot({ noPerView: true })
   await h.pollNow('test')
   await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  const o = ctx.overlays[0]
-  const parts = o.posts.filter((m) => m.type === 'html')
-  assert.ok(parts.length >= 3, `${parts.length} parts`)
-  for (const m of o.posts) assert.ok(JSON.stringify(m).length <= 1040384)
-  assert.match(parts.map((m) => m.part).join(''), /&quot;quoted&quot;/)
+  assert.equal(ctx.overlays[0].closed, true)
+  assert.equal(ctx.overlays[0].posts.length, 0)
+  assert.match(ctx.lastState().notice.text, /needs cc-cockpit 0\.27\.0 or later/)
+  await h.stop()
+})
+
+test('the window of an issue not in the cached rows has the bare key as title, with no dangling colon', async () => {
+  const { ctx, h } = boot()
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.equal(ctx.overlays[0].spec.title, 'ABC-1')
+  await h.stop()
+})
+
+test('a window the app refuses: the notice says so and nothing is read', async () => {
+  const { ctx, h, jira } = boot({ overlayRefuse: 'overlay: at most 3 open' })
+  await h.pollNow('test')
+  const before = jira.calls.length
+  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  assert.match(ctx.lastState().notice.text, /at most 3 open/)
+  assert.equal(jira.calls.length, before)
   await h.stop()
 })
 
@@ -513,116 +524,9 @@ test('↗ goes through ctx.openExternal when the app has it (0.9.1+), not xdg-op
   await h.stop()
 })
 
-test('with ctx.openExternal (cc-cockpit 0.9.1+) the issue goes with a details column; the body keeps the title alone', async () => {
-  const calls = []
-  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
-  const { ctx, h } = boot({ reviewer })
-  ctx.openExternal = async () => {}
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(calls.length, 1)
-  assert.match(calls[0].aside, /^<dl class="facts"><dt>Status<\/dt>/)
-  assert.match(calls[0].html, /^<div class="card"><h1>ABC-1: [^<]+<\/h1><\/div>\n/)
-  assert.doesNotMatch(calls[0].html, /class="facts"/)
-  await h.stop()
-})
-
-test('without ctx.openExternal (0.9.0 and older) no aside is sent and the facts stay in the header card', async () => {
-  const calls = []
-  const reviewer = { annotate: async (spec) => (calls.push(spec), { ok: true }) }
-  const { ctx, h } = boot({ reviewer })
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(calls[0].aside, undefined)
-  assert.match(calls[0].html, /<dl class="facts">/)
-  await h.stop()
-})
-
-// ---- overlay type, buttons, early reader (inbox redesign, task 24) ----
+// ---- overlay type and buttons (inbox redesign, task 24; 0.9.0: no reviewer, no Reply button) ----
 
 const ITEM = (id, source = 'bronos.jira') => ({ type: { name: 'inbox-item', data: { source, id } }, title: 't', opener: 'bronos.jira' })
-
-test('issue overlays: the reader page starts at once with the inbox-item type and ready manual, before the issue is read', async () => {
-  const { ctx, h, jira } = boot({ reviewer: null })
-  await h.pollNow('test')
-  const reads = () => jira.calls.filter((x) => /\/issue\/ABC-1/.test(x.url)).length
-  const before = reads()
-  const start = ctx.overlay.start
-  let readsAtStart = -1
-  ctx.overlay.start = (spec) => ((readsAtStart = reads() - before), start(spec))
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(readsAtStart, 0, 'the overlay was asked for before the issue was read')
-  const o = ctx.overlays[0]
-  assert.equal(o.spec.ready, 'manual')
-  assert.deepEqual(o.spec.type, { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } })
-  assert.equal(o.spec.title, 'ABC-1: Checkout fails for EU cards')
-  const doc = o.posts.find((p) => p.type === 'doc')
-  assert.equal(doc.toolbar, true, 'with the app toolbar the page drops its Discuss and New session')
-  const text = o.discuss().text
-  assert.match(text, /^Jira issue: ABC-1 Checkout fails for EU cards\nStatus: /)
-  assert.ok(text.length <= 4000)
-  await h.stop()
-})
-
-test('issue overlays: an issue not in the cached rows opens with the bare key as title, with no dangling colon', async () => {
-  const { ctx, h } = boot({ reviewer: null })
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(ctx.overlays[0].spec.title, 'ABC-1')
-  await h.stop()
-})
-
-test('issue overlays: an older app (no ctx.overlay.buttons) keeps the page buttons and still opens', async () => {
-  const { ctx, h } = boot({ reviewer: null, noButtons: true })
-  await h.pollNow('test')
-  assert.equal(ctx.buttonProviders.length, 0)
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(ctx.overlays.length, 1)
-  assert.equal(ctx.overlays[0].posts.find((p) => p.type === 'doc').toolbar, undefined)
-  await h.stop()
-})
-
-test('issue overlays: the early overlay closes when the issue cannot be read, with the error shown', async () => {
-  const { ctx, h } = boot({ reviewer: null, jira: { fail: { 'ABC-1': 500 } } })
-  await h.pollNow('test')
-  // Nothing cached to fall back on for this key's full read: drop the cached copy.
-  h.S.cache.issues['ABC-1'] = undefined
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(ctx.overlays.length, 1)
-  assert.equal(ctx.overlays[0].closed, true, 'the manual-ready loader does not stay')
-  assert.equal(ctx.lastState().notice.kind, 'error')
-  await h.stop()
-})
-
-test('issue overlays: a failed post to the reader shows an error and closes the loader', async () => {
-  const { ctx, h } = boot({ reviewer: null })
-  await h.pollNow('test')
-  const start = ctx.overlay.start
-  ctx.overlay.start = (spec) => {
-    const handle = start(spec)
-    return { ...handle, post: () => { throw new Error('message too big') } }
-  }
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  assert.equal(ctx.overlays[0].closed, true)
-  assert.match(ctx.lastState().notice.text, /Cannot show ABC-1: message too big/)
-  assert.equal(ctx.lastState().notice.kind, 'error')
-  await h.stop()
-})
-
-test('issue overlays: the reviewer gets the type in prepare and annotate', async () => {
-  const seen = []
-  const reviewer = {
-    prepare: async (s) => (seen.push(['prepare', s.type]), { opened: true }),
-    cancel: async () => ({ closed: false }),
-    annotate: async (s) => (seen.push(['annotate', s.type]), { opened: true }),
-  }
-  const { ctx, h } = boot({ reviewer })
-  await h.pollNow('test')
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
-  const type = { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1' } }
-  assert.deepEqual(seen, [['prepare', type], ['annotate', type]])
-  assert.equal(ctx.overlays.length, 0, 'the reviewer path starts no page of ours')
-  await h.stop()
-})
 
 test('overlay buttons: only for our own items, labels follow state, run = act', async () => {
   const { ctx, h } = boot()
@@ -634,8 +538,8 @@ test('overlay buttons: only for our own items, labels follow state, run = act', 
   assert.deepEqual(await provider(ITEM('NOPE-1')), [])
   assert.deepEqual(await provider({ type: { name: 'inbox-item', data: null }, title: 't', opener: 'x' }), [])
   const before = await provider(ITEM('ABC-1'))
-  assert.deepEqual(before.map((b) => b.id), [before[0].id, 'reply'])
-  assert.ok(!before.some((b) => b.id === 'open'))
+  assert.equal(before.length, 1, 'Mark read or unread; Reply is the window\'s own tab')
+  assert.ok(!before.some((b) => b.id === 'open' || b.id === 'reply'))
   assert.match(before[0].label, /read/i)
   await before[0].run(ITEM('ABC-1'))
   const after = await provider(ITEM('ABC-1'))
@@ -646,60 +550,18 @@ test('overlay buttons: only for our own items, labels follow state, run = act', 
   await h.stop()
 })
 
-test('overlay buttons: only on overlays we or the reviewer opened, whatever the data names', async () => {
+test('overlay buttons: only on overlays we opened, whatever the data names (no reviewer is trusted)', async () => {
   const { ctx, h } = boot()
   await h.pollNow('test')
   const provider = ctx.buttonProviders[0].provider
   // `opener` is the app's record of who opened the overlay: another plugin naming our item, a type
-  // data claiming to be ours, the CLI or core get no buttons that act on it.
+  // data claiming to be ours, the CLI, core or the reviewer get no buttons that act on it.
   const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1', opener: 'bronos.jira' } }, title: 't', opener })
-  for (const foreign of ['evil.plugin', 'bronos.inbox', 'cli', 'core', '', undefined]) {
+  for (const foreign of ['evil.plugin', 'bronos.inbox', 'cockpit.reviewer', 'cli', 'core', '', undefined]) {
     assert.deepEqual(await provider(by(foreign)), [], `opener ${foreign}`)
   }
   assert.deepEqual(await provider({ type: by('x').type, title: 't' }), [])
-  // Our own reader page and the reviewer we hand the item to (the project's pick) do.
-  assert.equal((await provider(by('bronos.jira'))).length, 2, 'the item button and Reply')
-  ctx.services.provider = (name) => (name === 'reviewer' ? 'cockpit.reviewer' : null)
-  assert.equal((await provider(by('cockpit.reviewer'))).length, 2, 'the item button and Reply')
-  await h.stop()
-})
-
-test('overlay buttons: the reviewer the project picked, asked at button time; the bundled one only when picked', async () => {
-  const { ctx, h } = boot()
-  await h.pollNow('test')
-  const provider = ctx.buttonProviders[0].provider
-  const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1', opener: 'bronos.jira' } }, title: 't', opener })
-  let picked = 'other.reviewer'
-  const asked = []
-  ctx.services.provider = (name) => (asked.push(name), name === 'reviewer' ? picked : null)
-  // A replacement reviewer the project picked gets the buttons; the bundled one, not picked, does not.
-  assert.equal((await provider(by('other.reviewer'))).length, 2, 'the item button and Reply')
-  assert.deepEqual(await provider(by('cockpit.reviewer')), [])
-  assert.ok(asked.includes('reviewer'))
-  // The pick changes while we run: the next overlay follows it.
-  picked = 'cockpit.reviewer'
-  assert.equal((await provider(by('cockpit.reviewer'))).length, 2, 'the item button and Reply')
-  assert.deepEqual(await provider(by('other.reviewer')), [])
-  // No reviewer reachable, or the app refusing the name: no reviewer is trusted, our own page still is.
-  picked = null
-  assert.deepEqual(await provider(by('cockpit.reviewer')), [])
-  ctx.services.provider = () => {
-    throw new Error('plugin bronos.jira does not declare service "reviewer" in services.uses')
-  }
-  assert.deepEqual(await provider(by('cockpit.reviewer')), [])
-  assert.equal((await provider(by('bronos.jira'))).length, 2, 'the item button and Reply')
-  await h.stop()
-})
-
-test('overlay buttons: an older app without ctx.services.provider trusts the bundled reviewer only', async () => {
-  const { ctx, h } = boot()
-  await h.pollNow('test')
-  const provider = ctx.buttonProviders[0].provider
-  const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.jira', id: 'ABC-1', opener: 'bronos.jira' } }, title: 't', opener })
-  delete ctx.services.provider
-  assert.equal((await provider(by('cockpit.reviewer'))).length, 2, 'the item button and Reply')
-  assert.deepEqual(await provider(by('other.reviewer')), [])
-  assert.equal((await provider(by('bronos.jira'))).length, 2, 'the item button and Reply')
+  assert.equal((await provider(by('bronos.jira'))).length, 1)
   await h.stop()
 })
 
@@ -717,10 +579,11 @@ test('overlay buttons: a refused act shows in the notice and throws, not silent'
 })
 
 test('overlay buttons: a ctx without the member still activates and opens an issue', async () => {
-  const { ctx, h } = boot({ noButtons: true, reviewer: { annotate: async () => ({}) } })
+  const { ctx, h } = boot({ noButtons: true })
   await h.pollNow('test')
   assert.equal(ctx.buttonProviders.length, 0)
-  await ctx.sendPanel({ type: 'open', key: 'ABC-1' })
+  const o = await openWindow(ctx, 'ABC-1', OWNER)
+  await until(() => kitView(o, 'c-owner').phase === 'ready')
   assert.equal(ctx.lastState().notice, null)
   await h.stop()
 })

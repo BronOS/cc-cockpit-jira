@@ -1,6 +1,6 @@
 'use strict'
-// The opened issue as one HTML document (the reviewer's HTML mode, and the plugin's own reader
-// page): a header card (key and summary, then type, status, priority, people and dates), the
+// The opened issue as one HTML document (the issue window, 0.9.0, drawn by the overlay kit's renderer, and
+// the `jira` service's document()): a header card (key and summary, then type, status, priority, people and dates), the
 // description, the comments oldest first as cards (the ones after the person's seen mark get
 // `.new`), and the attachments. Everything goes through adfhtml's escaping; this file writes only
 // fixed markup around it, with the classes the reviewer's allow-list keeps (card, card-header,
@@ -44,6 +44,8 @@ const bytes = (s) => Buffer.byteLength(s, 'utf8')
  * @param {string} [o.lane]
  * @param {Map<string, string>} [o.assets] attachment id -> asset id of the images downloaded
  * @param {string} [o.note] a line shown above the header (the cached copy's reason)
+ * @param {boolean} [o.fold] the issue window (0.9.0): the header card's key facts as pills, every other
+ *   detail (issueDetails) folded under More details in it; ignored with `aside`
  * @param {number} [o.maxBytes] the html budget in UTF-8 bytes (default and maximum HTML_MAX_BYTES; the
  *   `jira` service passes a smaller one when another plugin embeds the issue in its own document)
  * @returns {{ html: string, inlined: Set<string>, omittedComments: number }}
@@ -76,7 +78,7 @@ function issueDocument(o) {
   const parts = []
   if (o.note) parts.push(`<p><em>${esc(o.note)}</em></p>`)
   // With a details column (o.aside) the facts live there and the body starts with the title alone.
-  parts.push(o.aside ? `<div class="card"><h1>${esc(issue.key)}: ${esc(issue.summary || '')}</h1></div>` : headerCard(issue, o.lane))
+  parts.push(o.aside ? `<div class="card"><h1>${esc(issue.key)}: ${esc(issue.summary || '')}</h1></div>` : headerCard(issue, o.lane, o.fold ? issueDetails(issue, raw, o.lane, site) : ''))
 
   // Description.
   parts.push('<h2>Description</h2>')
@@ -194,7 +196,7 @@ function issueDetails(i, raw, lane, site) {
   ].join('')
 }
 
-function headerCard(i, lane) {
+function headerCard(i, lane, more = '') {
   const facts = []
   if (i.status) facts.push(`<dt>Status</dt><dd><span class="lozenge lozenge-${statusTone(i, lane)}">${esc(i.status)}</span></dd>`)
   if (i.priority) facts.push(`<dt>Priority</dt><dd><span class="lozenge lozenge-${priorityTone(i.priority)}">${esc(i.priority)}</span></dd>`)
@@ -204,6 +206,8 @@ function headerCard(i, lane) {
   if (i.reporter) meta.push(`Reporter: ${esc(i.reporter)}`)
   if (i.created) meta.push(`Created ${esc(stamp(i.created))}`)
   if (i.updatedAt) meta.push(`Updated ${esc(stamp(i.updatedAt))}`)
+  // `more`: the details folded under the pills (the issue window), in place of the muted line.
+  if (more) return `<div class="card"><h1>${esc(i.key)}: ${esc(i.summary || '')}</h1>\n<dl class="facts">${facts.join('')}</dl>\n<details><summary>More details</summary>${more}</details></div>`
   return `<div class="card"><h1>${esc(i.key)}: ${esc(i.summary || '')}</h1>\n<dl class="facts">${facts.join('')}</dl>\n<div class="meta">${meta.join(' · ')}</div></div>`
 }
 

@@ -51,7 +51,7 @@ function rowClickOpens(inControl, selecting) {
  * The triage button is labelled with the verdict itself ("action ▾"), not "Wrong?": a new person
  * could not tell what was wrong; the label says what triage decided, the chooser asks the question.
  *
- * Reply (0.8.0) opens the reply page (a comment, a status change); it is left out when the writes
+ * Reply (0.8.0; 0.9.0: the Reply tab of the issue window) opens a comment and a status change; it is left out when the writes
  * setting is off (`s.writes` false) and in a read-only guest's view (`s.readOnly`, the page's own
  * ccPanel.view.access: a hint that only hides, the host checks the click's `from.access` itself).
  *
