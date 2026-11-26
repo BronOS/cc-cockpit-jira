@@ -10,7 +10,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const KIT = path.join(__dirname, '../vendor/cc-kit')
-const KIT_VERSION = '0.1.1'
+const KIT_VERSION = '0.1.2'
 
 test('the vendored kit\'s bytes match its SHA256SUMS, and it is the pinned version', () => {
   const lines = fs.readFileSync(path.join(KIT, 'SHA256SUMS'), 'utf8').trim().split('\n')
