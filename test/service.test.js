@@ -86,7 +86,7 @@ test('the TTL cache is bounded, oldest out', () => {
 
 // ---- the host ----
 
-test('the host provides jira with site, issue, document and openIssue (v2)', () => {
+test('the host provides jira with site, issue, document and openIssue (major 1, openIssue since 0.9.0)', () => {
   const { ctx, h } = boot()
   assert.deepEqual(Object.keys(ctx.provided.jira).sort(), ['document', 'issue', 'openIssue', 'site'])
   return h.stop()
@@ -275,7 +275,7 @@ test('document(): one at a time, a short queue; the rest are refused', async () 
   await h.stop()
 })
 
-test('openIssue(key, { reply }) (v2): the issue window, focused when open; Reply only when asked and writes are on', async () => {
+test('openIssue(key, { reply }) (0.9.0): the issue window, focused when open; Reply only when asked and writes are on', async () => {
   const { ctx, call, h } = boot()
   await h.pollNow('test')
   assert.deepEqual(await call('openIssue', 'abc-1'), { opened: true })

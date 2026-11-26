@@ -166,7 +166,7 @@
   },
   "services": {
     "provides": {
-      "jira": 2,
+      "jira": 1,
       "inbox-feed": 2
     },
     "uses": {

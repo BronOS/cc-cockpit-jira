@@ -13,7 +13,7 @@ service to other plugins (section "The jira service"); no app change needed.
 checked by the person by default (section "Writing to Jira"). Read-only before it.
 0.9.0 (the Overlay foundation team run, 2026-11-26): the issue opens in its own window (a perView overlay
 drawn with cc-cockpit's overlay kit, vendored): notes, Ask and Reply in a side column; the reviewer and the
-reply page are gone; parts beside other plugins' windows; the `jira` service v2 (`openIssue`).
+reply page are gone; parts beside other plugins' windows; the `jira` service gains `openIssue` (still major 1).
 
 Prior art (port its decisions, not its user-specific text): the older cockpit's Jira connector,
 `~/Projects/claude-config/cockpit/connectors/jira.py` and `lib/jirasite.py` (REST v3, API token,
@@ -206,7 +206,7 @@ errors (auth, network) as a notice.
 - `ccc jira show`, Discuss, New session and triage keep the plain text (`readableText`,
   `triageText`).
 
-## The jira service (v1, 0.5.0; v2, 0.9.0)
+## The jira service (major 1: 0.5.0; `openIssue` since 0.9.0)
 
 `ctx.services.provide('jira', { site, issue, document, openIssue })` in activate. The first consumer is
 bronos.gmail (Jira mail: triage hints, the issue below the mail); any plugin of the project can
@@ -239,9 +239,13 @@ time limit from the app), so this plugin checks and caps its callers itself (`li
   busy ...`, `jira: too many ... a minute`), with a log line naming `ctx.services.caller()` (read
   before the method's first await). Errors are thrown as `jira: <message>`; the client's messages
   carry no token.
-- `openIssue(key, { reply? })` (v2, 0.9.0) -> `{ opened: true }`: the issue window as a row click opens it
+- `openIssue(key, { reply? })` (0.9.0) -> `{ opened: true }`: the issue window as a row click opens it
   (focused when open); `reply: true` (exactly) selects Reply when writes are on. For another plugin's "Open
-  issue" (Gmail). Errors as `jira: <message>`.
+  issue" (Gmail). Errors as `jira: <message>`. The service stays major 1 (spec-review S12): every consumer
+  declares `jira: 1`, and a major 2 would make the app refuse it (`version-mismatch`). `openIssue` is optional:
+  a service handle answers every method name, so `typeof` cannot tell; a Jira plugin before 0.9.0 refuses the call
+  with `service "jira" (plugin bronos.jira) has no method "openIssue"`, which the caller takes as absent (Gmail
+  and Calendar then open the issue's browse URL).
 - Not configured: `issue`, `document` and `openIssue` reject with `jira: the Jira plugin is not configured in
   this project (<missing fields>)`.
 

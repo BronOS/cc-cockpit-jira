@@ -228,8 +228,8 @@ older app reads stdin for every `ccc jira` call, bounded by ccc's own deadline).
 
 ## The jira service
 
-Since 0.5.0 the plugin provides the service `jira` to the other plugins of the project (v2 since 0.9.0:
-`openIssue`). A plugin declares `"services": { "uses": { "jira": 1 } }` (`2` for `openIssue`) and calls `ctx.services.use('jira')`; it
+Since 0.5.0 the plugin provides the service `jira` to the other plugins of the project. A plugin declares
+`"services": { "uses": { "jira": 1 } }` and calls `ctx.services.use('jira')`; it
 needs nothing else (no token: the calls go through this plugin, which talks to Jira). Every method
 is async, takes and returns plain data, and rejects with `jira: <why>` (never a token).
 
@@ -238,7 +238,7 @@ is async, takes and returns plain data, and rejects with `jira: <why>` (never a 
 | `site()` | `{ ready, site, senders, account }`: the configured site, the addresses its notification mails come from (`mailSenders`, else `jira@<site host>`), and your account `{ accountId, displayName }` once a poll knows it (else null). Not configured: `ready: false` and `error`. Never rejects. |
 | `issue(key, { maxAgeMs? })` | `{ key, summary, status, category, done, priority, type, assignee, mine, lane, url, updatedAt, source, at }`: `category` is Jira's status category (`new`, `indeterminate`, `done`), `mine` whether you are the assignee, `lane` the panel lane or null, `source` `poll` or `fetch`. From the last poll when it is at most `maxAgeMs` old (default 5 min, 15 s to 1 h), else from a cache of earlier answers, else one small read of the issue's header fields. |
 | `document(key, { maxHtmlBytes?, maxImages?, maxImageChars?, waitMs? })` | `{ key, title, url, html, aside, assets }`: the issue as a styled document (the HTML body, the details column, the pictures as assets `{ id, name, mime, dataUrl }`), read fresh (the cached copy, with `stale`, when Jira cannot be reached). The options can only lower this plugin's own limits (2,000,000 bytes, 15 pictures, 7.5 MiB, 10 s), for a plugin that shows the issue beside its own content. It does not mark the issue read. |
-| `openIssue(key, { reply? })` (v2) | `{ opened: true }`: the issue's window, as a row click opens it (brought to the front when open); `reply: true` opens it on Reply when writing is on. For a plugin's own "Open issue" (a Jira mail in Gmail). |
+| `openIssue(key, { reply? })` (0.9.0) | `{ opened: true }`: the issue's window, as a row click opens it (brought to the front when open); `reply: true` opens it on Reply when writing is on. For a plugin's own "Open issue" (a Jira mail in Gmail). Optional: the service is still major 1, and a Jira plugin before 0.9.0 refuses the call with `service "jira" (plugin bronos.jira) has no method "openIssue"`, which a caller takes as "not there" (open the issue's page instead). |
 
 `key` must look like `ABC-123` (letters, digits and `_`, a dash, a number; at most 64 characters), so
 nothing else reaches a Jira URL. The service protects Jira from a busy caller: lookups that need Jira

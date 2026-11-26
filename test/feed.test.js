@@ -607,10 +607,12 @@ test('an older app (services without useAll or emit) still activates, provides a
   await h.stop()
 })
 
-test('the manifest provides jira 2 and inbox-feed 2 at 0.9.0', () => {
+// jira stays major 1 at 0.9.0 (spec-review S12): openIssue is an optional method a consumer detects by its "has no
+// method" refusal, and every consumer (Gmail, Calendar, Autopilot) declares jira 1, which a major 2 would refuse.
+test('the manifest provides jira 1 and inbox-feed 2 at 0.9.0', () => {
   const m = require('../plugin.json')
   assert.equal(m.version, '0.9.0')
-  assert.deepEqual(m.services.provides, { jira: 2, 'inbox-feed': 2 })
+  assert.deepEqual(m.services.provides, { jira: 1, 'inbox-feed': 2 })
 })
 
 async function until(fn, ms = 2000) {
